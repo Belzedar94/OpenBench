@@ -13,6 +13,7 @@ av2-facts.workspace = true
 av2-store.workspace = true
 av2-rules.workspace = true
 csv.workspace = true
+memmap2.workspace = true
 serde_json.workspace = true
 xxhash-rust.workspace = true
 

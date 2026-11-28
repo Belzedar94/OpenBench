@@ -15,6 +15,9 @@ pub struct Applied {
     pub deltas: Vec<Delta>,
     /// Events for the projection (v1 `DBEvent` rows).
     pub events: Vec<Event>,
+    /// Ladder fields the writer must put in these positions' ext records in
+    /// the same batch, before the next input (`state::Ladder::store_in`).
+    pub ladder: Vec<(u64, crate::state::Ladder)>,
 }
 
 impl QueueState {
@@ -93,7 +96,7 @@ impl QueueState {
             },
             Input::Tick { now } => {
                 let recycled_solves = self.recycle_stale_solve_leases(*now);
-                let pruned = self.prune(*now, &|p| env.visits(p));
+                let pruned = self.prune(*now, env);
                 Output::Tick { recycled_solves, pruned }
             }
             Input::SetConfig { config, .. } => {
@@ -102,7 +105,7 @@ impl QueueState {
                 Output::Ok
             }
         };
-        let (deltas, events) = self.finish();
-        Applied { output, deltas, events }
+        let (deltas, events, ladder) = self.finish();
+        Applied { output, deltas, events, ladder }
     }
 }

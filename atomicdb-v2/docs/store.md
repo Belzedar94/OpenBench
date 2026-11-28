@@ -34,7 +34,7 @@ was measured. Code: `crates/av2-store`; tools: `crates/av2-tools`.
 ```
 <store>/graph/ctl            4 KiB: magic, format version, shard bits, counters
               core.col       32 B per position   (av2_model::Core)
-              ext.col        64 B per ext record (av2_model::Ext), arena indexed from core
+              ext.col        72 B per ext record (av2_model::Ext), arena indexed from core
               out.col         5 B per position   offset+1 of its out-edge block
               parent.col      5 B per position   parent id+1, or LIST|head of a parent list
               fen.col        36 B per position   packed canonical FEN (or a blob reference)
@@ -61,7 +61,7 @@ valid prefix.
 | Plan | Here | Why |
 |---|---|---|
 | core 20 B | **32 B** | The 48-bit `version` (plan 2.2 point 4) does not fit in 20 B with the other fields; 5 bytes are kept free for the rules port. 12 B more per position. |
-| ext 48 B | **64 B** | Exact counters (nodes, backed nodes, time, depth, visits, campaign) and three blob references (`last_analysis`, `analysis_passes`, `won_line`). 4 B are reserved for the showcase bound (`TODO(rules)`). Only 17.7% of positions have one in the production slice. |
+| ext 48 B | **72 B** | Exact counters (nodes, backed nodes, time, depth, visits, campaign), three blob references (`last_analysis`, `analysis_passes`, `won_line`) and the queue's two ladder fields (bought and searched rung of the task rows folded out of the queue, 1000-node units; format 4). 4 B are reserved for the showcase bound (`TODO(rules)`). Only 17.7% of positions have one in the production slice. |
 | key map 96-bit fingerprint -> id, open addressing | same, **sharded** (4096 shards by default), 17 B slots | One table cannot be resized without rewriting all of it; a shard is rebuilt alone (section 4). |
 | Bloom filter 10 bits per position | same, **one blocked filter per shard** (6 probes in one cache line) | The filter is rebuilt with its shard. |
 | fen.col ~28 B packed | **36 B**, packed only when unpacking gives back the same string, else a blob | No chess rules in the store; exactness by construction. |

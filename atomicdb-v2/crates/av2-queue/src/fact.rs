@@ -1,19 +1,20 @@
 //! How a queue input goes into the log, and how the log rebuilds the queue.
 //!
-//! One fact per applied input: `Fact::Opaque { kind: "queue.v1", data }`
-//! with `data = {"input": ..., "deltas": [...], "events": [...]}`.  The input
-//! is the audit trail (and what a rule-change replay re-applies); the deltas
-//! are what recovery applies, so rebuilding the queue needs neither the graph
-//! nor the rules.  TODO(core): give it a kind code of its own in
-//! `av2-facts` (proposed: 11 `QUEUE`); the payload stays the same.
+//! One fact per applied input: `Fact::Queue` (kind 11) whose payload is
+//! `{"input": ..., "deltas": [...], "events": [...]}`.  The input is the
+//! audit trail (and what a rule-change replay re-applies); the deltas are
+//! what recovery applies, so rebuilding the queue needs neither the graph
+//! nor the rules.  Logs written before kind 11 existed carried the same
+//! payload as `Fact::Opaque { kind: "queue.v1" }`; `decode` still reads them.
 
 use crate::apply::Applied;
 use crate::input::Input;
 use crate::state::{Delta, Event, QueueState};
-use av2_facts::{Fact, Opaque, RawJson};
+use av2_facts::{Fact, RawJson};
 use serde::{Deserialize, Serialize};
 
-pub const KIND: &str = "queue.v1";
+/// The `Opaque` kind of queue facts before kind 11.
+pub const LEGACY_KIND: &str = "queue.v1";
 
 #[derive(Serialize, Deserialize)]
 struct Record<'a> {
@@ -30,16 +31,17 @@ pub fn record(input: &Input, applied: &Applied) -> Fact {
         deltas: std::borrow::Cow::Borrowed(&applied.deltas),
         events: std::borrow::Cow::Borrowed(&applied.events),
     };
-    Fact::Opaque(Opaque { kind: KIND.to_string(), data: RawJson(serde_json::to_string(&r).expect("queue record serialises")) })
+    Fact::Queue(RawJson(serde_json::to_string(&r).expect("queue record serialises")))
 }
 
 /// Decode a queue fact: `(input, deltas)`.  `None` for any other fact.
 pub fn decode(fact: &Fact) -> Option<Result<(Input, Vec<Delta>), String>> {
-    let Fact::Opaque(o) = fact else { return None };
-    if o.kind != KIND {
-        return None;
-    }
-    Some(serde_json::from_str::<Record>(&o.data.0).map(|r| (r.input.into_owned(), r.deltas.into_owned())).map_err(|e| e.to_string()))
+    let text = match fact {
+        Fact::Queue(raw) => &raw.0,
+        Fact::Opaque(o) if o.kind == LEGACY_KIND => &o.data.0,
+        _ => return None,
+    };
+    Some(serde_json::from_str::<Record>(text).map(|r| (r.input.into_owned(), r.deltas.into_owned())).map_err(|e| e.to_string()))
 }
 
 /// Replay the queue facts of a log onto a state (recovery after the last

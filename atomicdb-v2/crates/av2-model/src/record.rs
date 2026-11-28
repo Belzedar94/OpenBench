@@ -1,7 +1,7 @@
 //! The two per-position records of the graph columns.
 //!
 //! **Core** (32 bytes, every position): what a climb reads of every child.
-//! **Ext** (64 bytes, only positions that were searched, backed, given a
+//! **Ext** (72 bytes, only positions that were searched, backed, given a
 //! witness line or tagged by a campaign): exact counters and blob references.
 //! A core record points at its ext record by index (40 bits, 0 = none).
 //!
@@ -334,7 +334,19 @@ impl Core {
 
 // ---------------------------------------------------------------- ext
 
-pub const EXT_SIZE: usize = 64;
+pub const EXT_SIZE: usize = 72;
+
+/// Unit of the two ladder fields: 1,000 nodes.  A budget is stored floored
+/// to the unit, which keeps every comparison against a ladder rung or a
+/// clamp exact (they are all multiples of 1,000).
+pub const LADDER_UNIT: u64 = 1_000;
+
+/// File next to `graph/` (`<store>/v1prio.col`) holding v1's stored
+/// `Position.priority` per position id: f64 little-endian, 8 bytes per id,
+/// written once by the loader, read-only afterwards.  The exact port orders
+/// AUTO/FILL leases by it (queue file Q-2.16 key 8; D5 keeps priority out of
+/// the records).  Missing file or id beyond its end = 0.0.
+pub const V1PRIO_FILE: &str = "v1prio.col";
 
 /// The record of positions with more to say.  Byte layout:
 ///
@@ -350,7 +362,12 @@ pub const EXT_SIZE: usize = 64;
 /// | 40 | 8 | `analysis` | blob: `last_analysis` JSON as v1 stores it |
 /// | 48 | 8 | `passes` | blob: `analysis_passes` JSON |
 /// | 56 | 8 | `won_line` | blob: `won_line` text |
+/// | 64 | 4 | `ladder_bought` | max `budget_nodes` of the COMPLETED `AnalysisTask` rows (absorbed included) folded out of the queue, in `LADDER_UNIT`s, 0 = none (queue file Q-6.2) |
+/// | 68 | 4 | `ladder_searched` | the same over rows with `nodes_searched > 0` |
 ///
+/// The two ladder fields are written by the writer for the queue
+/// (`av2-queue`, rows that no revive path can reach again) and by the loader
+/// (`ladder_bought`/`ladder_searched` columns of the export).
 /// TODO(rules): the plan wants the showcase's line heads here so that
 /// seeding does not have to parse the analysis blob; decide in the stage (a)
 /// port.  Blob references are opaque to the rules: they are written with
@@ -366,6 +383,8 @@ pub struct Ext {
     pub analysis: crate::graph::BlobRef,
     pub passes: crate::graph::BlobRef,
     pub won_line: crate::graph::BlobRef,
+    pub ladder_bought: u32,
+    pub ladder_searched: u32,
 }
 
 impl Ext {
@@ -381,6 +400,8 @@ impl Ext {
         b[40..48].copy_from_slice(&self.analysis.0.to_le_bytes());
         b[48..56].copy_from_slice(&self.passes.0.to_le_bytes());
         b[56..64].copy_from_slice(&self.won_line.0.to_le_bytes());
+        b[64..68].copy_from_slice(&self.ladder_bought.to_le_bytes());
+        b[68..72].copy_from_slice(&self.ladder_searched.to_le_bytes());
     }
 
     pub fn decode(b: &[u8]) -> Ext {
@@ -397,7 +418,19 @@ impl Ext {
             analysis: crate::graph::BlobRef(u64_at(40)),
             passes: crate::graph::BlobRef(u64_at(48)),
             won_line: crate::graph::BlobRef(u64_at(56)),
+            ladder_bought: u32_at(64),
+            ladder_searched: u32_at(68),
         }
+    }
+
+    /// A budget in nodes as a ladder field (floored, saturated).
+    pub fn ladder_units(nodes: u64) -> u32 {
+        (nodes / LADDER_UNIT).min(u32::MAX as u64) as u32
+    }
+
+    /// A ladder field back in nodes (`None` for 0).
+    pub fn ladder_nodes(units: u32) -> Option<u64> {
+        (units != 0).then_some(units as u64 * LADDER_UNIT)
     }
 
     pub fn to_bytes(&self) -> [u8; EXT_SIZE] {
@@ -456,6 +489,8 @@ mod tests {
             analysis: crate::graph::BlobRef(99),
             passes: crate::graph::BlobRef(0),
             won_line: crate::graph::BlobRef(1 << 40),
+            ladder_bought: 2_000_000,
+            ladder_searched: 128_000,
         };
         assert_eq!(Ext::decode(&e.to_bytes()), e);
         assert!(Ext::default().is_default());

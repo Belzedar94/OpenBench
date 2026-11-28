@@ -59,7 +59,30 @@ fn the_staircase() {
     h.advance(2 * HOUR);
     assert_eq!(h.request("alice", p, |r| r.one_search = true).status, "ladder-spent");
     assert!(h.q.live_tasks_of(p).is_empty());
-    assert!(budget::ladder_exhausted(true, h.q.completed_max_budget(p)));
+    assert!(budget::ladder_exhausted(true, h.q.completed_max_budget(p, &h.env)));
+}
+
+/// Retention: a delivered row below the position's visits, served more than
+/// an hour ago, leaves memory and its rung goes to the ext ladder (owner
+/// decision, 28-Nov); the next request still climbs from it.
+#[test]
+fn folded_rows_keep_the_ladder_in_the_ext_record() {
+    let mut h = H::new();
+    let p = h.pos();
+    h.request("a", p, |_| {});
+    let id = land(&mut h, p);
+    h.advance(2 * HOUR);
+    let a = h.apply(Input::Tick { now: h.now });
+    assert_eq!(a.output, Output::Tick { recycled_solves: 0, pruned: 1 });
+    assert_eq!(a.ladder, vec![(p, av2_queue::Ladder { bought: Some(B128), searched: Some(B128) })]);
+    assert!(h.q.task(id).is_none());
+    assert_eq!(h.q.completed_max_budget(p, &h.env), Some(B128));
+    assert_eq!(h.request("a", p, |_| {}).status, "queued");
+    assert_eq!(live(&h, p).budget, B512);
+    // The ext encoding floors to 1,000 nodes and gives the rungs back exactly.
+    let mut e = av2_model::Ext::default();
+    av2_queue::Ladder { bought: Some(128_000_999), searched: None }.store_in(&mut e);
+    assert_eq!(av2_queue::Ladder::from_ext(&e), av2_queue::Ladder { bought: Some(128_000_000), searched: None });
 }
 
 /// test_frontier.py::LadderExhaustionTests::test_ladder_exhausted_reports_only_the_spent_top_rung

@@ -362,19 +362,19 @@ impl QueueState {
             return Outcome::AlreadySolved;
         }
         if only_unexplored && !is_unexplored(&p) {
-            return Outcome::AlreadyAnalyzed { completed_budget: self.searched_budget(pos) };
+            return Outcome::AlreadyAnalyzed { completed_budget: self.searched_budget(pos, env) };
         }
         let mut target = None;
         if only_if_missing {
             let tgt = budget_floor.filter(|&b| b > 0).unwrap_or(REQUEST_BUDGET_LADDER[0]);
             target = Some(tgt);
-            if let Some(s) = self.searched_budget(pos)
+            if let Some(s) = self.searched_budget(pos, env)
                 && s >= tgt
             {
                 return Outcome::AlreadyAnalyzed { completed_budget: Some(s) };
             }
         }
-        let completed_max = self.completed_max_budget(pos);
+        let completed_max = self.completed_max_budget(pos, env);
         if target.is_none() && completed_max.map(|c| c >= REQUEST_BUDGET_LADDER[2]).unwrap_or(false) {
             return Outcome::LadderExhausted;
         }
@@ -592,7 +592,7 @@ impl QueueState {
         // Q-6.24
         if r.only_if_missing && p.status == Status::Unknown {
             let want = r.budget_floor.unwrap_or(REQUEST_BUDGET_LADDER[0]);
-            if let Some(s) = self.searched_budget(r.pos).filter(|&s| s >= want) {
+            if let Some(s) = self.searched_budget(r.pos, env).filter(|&s| s >= want) {
                 detail.insert("completed_budget".into(), json!(s));
                 self.task_fields(r, &mut detail);
                 return RequestOut { status: "already-analyzed".into(), detail };
@@ -602,7 +602,7 @@ impl QueueState {
         let recent = self.recent_request(&r.ip, r.pos, now);
         if recent && r.budget_floor.is_none() {
             let mut active = self.live_user_task_on(r.pos);
-            if !active && ladder_exhausted(p.status == Status::Unknown, self.completed_max_budget(r.pos)) {
+            if !active && ladder_exhausted(p.status == Status::Unknown, self.completed_max_budget(r.pos, env)) {
                 active = env.children(r.pos).iter().any(|(_, c)| self.live_user_task_on(*c));
             }
             if active {

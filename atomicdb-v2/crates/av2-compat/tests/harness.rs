@@ -238,6 +238,7 @@ fn settings() -> Settings {
         machine_prefix: "t".into(),
         worker_build: 2026112501,
         gate_enforced: false,
+        decision_d8: false,
         engine_sha: String::new(),
     }
 }

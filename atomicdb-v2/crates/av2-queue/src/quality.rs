@@ -47,7 +47,10 @@ impl QualityBuyer<'_> {
     /// The deltas and events of the purchases, as `QueueState::apply` returns
     /// them for an input.
     pub fn finish(self) -> (Vec<Delta>, Vec<Event>) {
-        self.q.finish()
+        let (deltas, events, ladder) = self.q.finish();
+        // Only retention folds task rows into the ext ladder; a purchase never does.
+        debug_assert!(ladder.is_empty());
+        (deltas, events)
     }
 
     /// Finish and return the fact to log for the purchases (`queue.v1`,
@@ -58,7 +61,7 @@ impl QualityBuyer<'_> {
         if deltas.is_empty() && events.is_empty() {
             return None;
         }
-        let applied = crate::apply::Applied { output: crate::input::Output::Ok, deltas, events };
+        let applied = crate::apply::Applied { output: crate::input::Output::Ok, deltas, events, ladder: Vec::new() };
         Some(crate::fact::record(&crate::input::Input::Purchases { now }, &applied))
     }
 }

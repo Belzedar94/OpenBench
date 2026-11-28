@@ -14,7 +14,7 @@ HTTP (auth, form parsing: protocol::parse_*)      timers / selector thread / rul
   QueueState::apply(input, env: &dyn QueueEnv, refill: &mut dyn Refill) -> Applied { output, deltas, events }
         |                                  ^ reads the graph (overlay)     ^ proposes tasks (selector)
         v
-  fact::record(input, applied)  ->  one Fact in the batch frame  (kind "queue.v1")
+  fact::record(input, applied)  ->  one Fact in the batch frame  (kind 11, Fact::Queue)
 ```
 
 - **Pure.** Every input carries `now` (OQ-10), and everything else that comes
@@ -191,9 +191,6 @@ is exact (property test) and 16x faster. The stand-in descent is not
 
 - Q-7, Q-10 drips, SOL-4 autosolve, backlog adoption, Q-3.25 backfill.
 - `Descent` over `av2-proof` tables (PN-6/PN-9 descents are not ported yet).
-- A kind code for queue facts in `av2-facts` (proposed 11 `QUEUE`); today
-  `Fact::Opaque { kind: "queue.v1" }`.
-- Where the stored v1 priority lives (decision for the store, §7).
 - `queue_ahead` is O(position): fine on a read copy; a counting structure if
   it ever moves back into the writer.
 
@@ -205,24 +202,28 @@ is exact (property test) and 16x faster. The stand-in descent is not
 - `RequestOut.detail` carries the 4.1 task fields (`task`, `budget_nodes`,
   `task_state` waiting/searching, `priority` low/normal, `backed`); `ahead`
   is added by the HTTP layer after the commit (display only).
-- **Not in the contract yet:** D8. A build below 2026072203 gets
-  `LeaseOut::UpgradeRequired`; the contract still describes `lease_token: ""`
-  for old builds. The wire answer (proposal: `400 {"error": "upgrade-required"}`,
-  a definitive 4xx for the worker) belongs in contract section 10.
+- D8: `LeaseOut::UpgradeRequired` is `400 {"error": "upgrade-required"}`
+  (contract section 2.2 and section 10; compat scenario `upgrade-required`,
+  `av2-compat worker --decision-d8`).
 
-## 7. Decisions needed
+## 7. Owner decisions of 28-Nov (applied)
 
-1. **Stored v1 priority, for the exact AUTO/FILL order.** 1,217,498 of the
-   slice's 1,560,369 positions carry a non-zero stored value (124
-   tombstones). It is not in the graph (D5). Options: (a) a read-only
-   column `v1prio.col` (8 B per position, written by the loader, never
-   again; tombstones/revivals stay queue state); (b) an `f64` in the ext
-   record's reserved bytes (only 4 free); (c) switch to computed priority
-   now (`computed_priority`), accepting a different AUTO/FILL order.
-   Recommendation: (a), then (c) as a listed decision.
-2. **Ladder memory.** `completed_max_budget`/`searched_budget` of positions
-   whose rows were folded out of memory live in `QueueState::frozen`
-   (HashMap, ~32 B per searched position). At production scale (tens of
-   millions of searched positions) that is ~1 GB in the writer.
-   Recommendation: two `u32` (1000-node units) in the ext record.
-3. **Kind code** for queue facts (above).
+1. **Stored v1 priority:** a read-only column. `sql/export.sql` exports
+   `priority`; `av2-load` writes `<store>/v1prio.col` (f64 LE per id,
+   `av2_model::record::V1PRIO_FILE`); `env::V1Priority` maps it and
+   `GraphEnv { priority: Some(&v1prio) }` feeds `QueueState::queue_rank`.
+   Tombstones and revivals stay queue state. 1,217,498 of the slice's
+   1,560,369 positions carry a non-zero value (124 tombstones).
+2. **Ladder memory:** two `u32` fields in the ext record
+   (`Ext::ladder_bought`, `Ext::ladder_searched`, 1,000-node units floored,
+   which keeps every comparison against a rung or clamp exact; ext 72 B,
+   store format 2). Retention (`Input::Tick`) folds a row into them and
+   returns the write in `Applied::ladder`; the writer stores it with
+   `Ladder::store_in` in the same batch, before the next input. The queue
+   reads them through `QueueEnv::ladder`. `export.sql` computes them for the
+   rows the queue does not import (COMPLETED, generation < visits) and exports
+   the rows it does (`analysistask_queue.csv`), plus every SolveTask and the
+   people tables the queue reads.
+3. **Queue facts:** `av2_facts::Fact::Queue`, kind 11 (payload unchanged;
+   `fact::decode` still reads the earlier `Opaque "queue.v1"`).
+4. **D8 wire answer:** see 6b.

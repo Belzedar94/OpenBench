@@ -129,6 +129,26 @@ fn a_restart_does_not_waste_a_running_search() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The loader's `v1prio.col` reaches the lease order through `GraphEnv`.
+#[test]
+fn stored_priority_file() {
+    let dir = tmp("v1prio");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut bytes = vec![0u8; 8 * 4];
+    bytes[8..16].copy_from_slice(&7.5f64.to_le_bytes());
+    bytes[24..32].copy_from_slice(&(-1e9f64).to_le_bytes());
+    std::fs::write(dir.join(av2_model::record::V1PRIO_FILE), &bytes).unwrap();
+    let p = V1Priority::open(&dir).unwrap();
+    assert_eq!((p.get(0), p.get(1), p.get(3), p.get(99)), (0.0, 7.5, -1e9, 0.0));
+    assert_eq!(p.non_zero(), 2);
+    let none = V1Priority::open(&dir.join("missing")).unwrap();
+    assert_eq!(none.get(1), 0.0);
+    let g = av2_store::mem::MemGraph::new();
+    let env = GraphEnv { graph: &g, priority: Some(&p) };
+    assert_eq!(QueueEnv::queue_rank(&env, 1), 7.5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The snapshot is canonical and restores to the same state.
 #[test]
 fn snapshot_round_trip() {

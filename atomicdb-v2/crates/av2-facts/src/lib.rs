@@ -248,6 +248,9 @@ pub enum Fact {
     RequestChanged(RequestChanged),
     LeaseEvent(LeaseEvent),
     Opaque(Opaque),
+    /// One queue input applied by the writer: `{"input", "deltas", "events"}`
+    /// (`av2-queue::fact`).  The payload is that JSON object, kept verbatim.
+    Queue(RawJson),
     /// A kind this build does not know, kept byte for byte.
     Unknown {
         kind: u16,
@@ -268,6 +271,7 @@ pub mod kind {
     pub const REQUEST_CHANGED: u16 = 8;
     pub const LEASE_EVENT: u16 = 9;
     pub const OPAQUE: u16 = 10;
+    pub const QUEUE: u16 = 11;
 }
 
 /// Current payload version written for every kind.
@@ -301,6 +305,7 @@ impl Fact {
             Fact::RequestChanged(_) => kind::REQUEST_CHANGED,
             Fact::LeaseEvent(_) => kind::LEASE_EVENT,
             Fact::Opaque(_) => kind::OPAQUE,
+            Fact::Queue(_) => kind::QUEUE,
             Fact::Unknown { kind, .. } => *kind,
         }
     }
@@ -317,6 +322,7 @@ impl Fact {
             Fact::RequestChanged(_) => "request_changed",
             Fact::LeaseEvent(_) => "lease_event",
             Fact::Opaque(_) => "opaque",
+            Fact::Queue(_) => "queue",
             Fact::Unknown { .. } => "unknown",
         }
     }
@@ -333,6 +339,7 @@ impl Fact {
             Fact::RequestChanged(x) => serde_json::to_vec(x),
             Fact::LeaseEvent(x) => serde_json::to_vec(x),
             Fact::Opaque(x) => serde_json::to_vec(x),
+            Fact::Queue(x) => serde_json::to_vec(x),
             Fact::Unknown { payload, .. } => Ok(payload.clone()),
         }
     }
@@ -382,6 +389,7 @@ fn decode_one(kind: u16, version: u16, at: usize, b: &[u8]) -> Result<Fact, Fact
         kind::REQUEST_CHANGED => Fact::RequestChanged(parse(kind, at, b)?),
         kind::LEASE_EVENT => Fact::LeaseEvent(parse(kind, at, b)?),
         kind::OPAQUE => Fact::Opaque(parse(kind, at, b)?),
+        kind::QUEUE => Fact::Queue(parse(kind, at, b)?),
         _ => Fact::Unknown { kind, version, payload: b.to_vec() },
     })
 }
@@ -472,6 +480,7 @@ mod tests {
             }),
             Fact::LeaseEvent(LeaseEvent { task: 9, event: "leased".into(), ..Default::default() }),
             Fact::Opaque(Opaque { kind: "dbevent".into(), data: RawJson("{\"k\":\"WALL\"}".into()) }),
+            Fact::Queue(RawJson("{\"input\": {\"op\": \"tick\", \"now\": 1}, \"deltas\": []}".into())),
             Fact::Unknown { kind: 999, version: 3, payload: b"{\"future\":true}".to_vec() },
         ]
     }

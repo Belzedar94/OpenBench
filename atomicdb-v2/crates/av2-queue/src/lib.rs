@@ -37,7 +37,7 @@ pub mod state;
 pub use apply::Applied;
 pub use config::{QueueConfig, SelectorMode};
 pub use consts::Ms;
-pub use env::{GraphEnv, MemEnv, PosInfo, QueueEnv};
+pub use env::{GraphEnv, MemEnv, PosInfo, QueueEnv, StoredPriority, V1Priority};
 pub use input::*;
 pub use model::*;
 pub use selector::{Descent, MintPlan, NoRefill, PnSelector, Refill, RegretSelector};

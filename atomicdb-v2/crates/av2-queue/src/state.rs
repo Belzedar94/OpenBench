@@ -43,6 +43,23 @@ pub struct Ladder {
 }
 
 impl Ladder {
+    /// The ladder fields of a position's ext record (`av2_model::Ext`).
+    pub fn from_ext(e: &av2_model::Ext) -> Ladder {
+        Ladder { bought: av2_model::Ext::ladder_nodes(e.ladder_bought), searched: av2_model::Ext::ladder_nodes(e.ladder_searched) }
+    }
+
+    /// Write this ladder into an ext record (floored to 1,000 nodes, which
+    /// keeps every comparison against a rung or a clamp exact).
+    pub fn store_in(&self, e: &mut av2_model::Ext) {
+        e.ladder_bought = self.bought.map(av2_model::Ext::ladder_units).unwrap_or(0);
+        e.ladder_searched = self.searched.map(av2_model::Ext::ladder_units).unwrap_or(0);
+    }
+
+    fn merge(&mut self, o: &Ladder) {
+        self.bought = self.bought.max(o.bought);
+        self.searched = self.searched.max(o.searched);
+    }
+
     fn fold(&mut self, t: &Task) {
         if t.state == TState::Completed {
             self.bought = Some(self.bought.map_or(t.budget, |b| b.max(t.budget)));
@@ -79,10 +96,6 @@ pub enum Delta {
         account: String,
         machine: String,
         serving: Serving,
-    },
-    Frozen {
-        pos: u64,
-        ladder: Ladder,
     },
     Dead {
         pos: u64,
@@ -158,7 +171,8 @@ pub(crate) struct TxLog {
     pub pings: BTreeSet<(String, String)>,
     pub prefs: BTreeSet<String>,
     pub serving: BTreeSet<(String, String)>,
-    pub frozen: BTreeSet<u64>,
+    /// Ladder writes for the writer (ext fields, rows folded out).
+    pub ladder: BTreeMap<u64, Ladder>,
     pub dead: BTreeSet<u64>,
     pub arms: BTreeSet<String>,
     pub receipts: BTreeSet<String>,
@@ -177,7 +191,6 @@ pub struct QueueState {
     pub(crate) pings: BTreeMap<(String, String), Ping>,
     pub(crate) prefs: BTreeMap<String, Pref>,
     pub(crate) serving: BTreeMap<(String, String), Serving>,
-    pub(crate) frozen: HashMap<u64, Ladder>,
     pub(crate) dead: BTreeSet<u64>,
     /// Tombstones revived since import: v1 wrote `priority = 0.0` (PRI-1.7).
     pub(crate) revived: BTreeSet<u64>,
@@ -201,7 +214,6 @@ struct Snapshot {
     pings: Vec<(String, String, Ping)>,
     prefs: Vec<(String, Pref)>,
     serving: Vec<(String, String, Serving)>,
-    frozen: Vec<(u64, Ladder)>,
     dead: Vec<u64>,
     #[serde(default)]
     revived: Vec<u64>,
@@ -213,7 +225,8 @@ struct Snapshot {
     sweep_waiting: Option<(bool, Ms)>,
 }
 
-const SNAPSHOT_FORMAT: u32 = 1;
+/// 2: the folded ladder moved to the ext record (it is graph data now).
+const SNAPSHOT_FORMAT: u32 = 2;
 
 impl QueueState {
     pub fn new(config: QueueConfig) -> QueueState {
@@ -268,9 +281,10 @@ impl QueueState {
 
     // ------------------------------------------------------------ ladder (Q-6.2)
 
-    /// `_completed_max_budget(pos)`: the rung bought (absorbed rows included).
-    pub fn completed_max_budget(&self, pos: u64) -> Option<u64> {
-        let mut l = self.frozen.get(&pos).copied().unwrap_or_default();
+    /// `_completed_max_budget(pos)`: the rung bought (absorbed rows included):
+    /// the ext ladder of the rows folded out, and the rows still here.
+    pub fn completed_max_budget(&self, pos: u64, env: &dyn crate::env::QueueEnv) -> Option<u64> {
+        let mut l = env.ladder(pos);
         for id in self.idx.by_pos.get(&pos).into_iter().flatten() {
             l.fold(&self.tasks[id]);
         }
@@ -278,8 +292,8 @@ impl QueueState {
     }
 
     /// `searched_budget(pos)`: the deepest search that ran.
-    pub fn searched_budget(&self, pos: u64) -> Option<u64> {
-        let mut l = self.frozen.get(&pos).copied().unwrap_or_default();
+    pub fn searched_budget(&self, pos: u64, env: &dyn crate::env::QueueEnv) -> Option<u64> {
+        let mut l = env.ladder(pos);
         for id in self.idx.by_pos.get(&pos).into_iter().flatten() {
             l.fold(&self.tasks[id]);
         }
@@ -536,7 +550,7 @@ impl QueueState {
 
     /// Close the current input: the deltas of every row it changed, in a
     /// fixed order, and the events it produced.
-    pub(crate) fn finish(&mut self) -> (Vec<Delta>, Vec<Event>) {
+    pub(crate) fn finish(&mut self) -> (Vec<Delta>, Vec<Event>, Vec<(u64, Ladder)>) {
         let tx = std::mem::take(&mut self.tx);
         let mut out = Vec::new();
         if tx.config {
@@ -568,9 +582,6 @@ impl QueueState {
                 machine: m,
             });
         }
-        for pos in tx.frozen {
-            out.push(Delta::Frozen { pos, ladder: self.frozen.get(&pos).copied().unwrap_or_default() });
-        }
         for pos in tx.dead {
             out.push(Delta::Dead { pos, dead: self.dead.contains(&pos), revived: self.revived.contains(&pos) });
         }
@@ -589,7 +600,7 @@ impl QueueState {
         if tx.counters {
             out.push(Delta::Counters { next_task: self.next_task, next_solve: self.next_solve, sweep_leases: self.sweep_leases });
         }
-        (out, tx.events)
+        (out, tx.events, tx.ladder.into_iter().collect())
     }
 
     /// Discard the changes recorded so far without producing deltas (used by
@@ -630,13 +641,6 @@ impl QueueState {
                 Delta::Serving { account, machine, serving } => {
                     self.serving.insert((account.clone(), machine.clone()), serving.clone());
                 }
-                Delta::Frozen { pos, ladder } => {
-                    if *ladder == Ladder::default() {
-                        self.frozen.remove(pos);
-                    } else {
-                        self.frozen.insert(*pos, *ladder);
-                    }
-                }
                 Delta::Dead { pos, dead, revived } => {
                     if *revived {
                         self.revived.insert(*pos);
@@ -670,8 +674,6 @@ impl QueueState {
     // ------------------------------------------------------------ snapshot
 
     pub fn snapshot(&self) -> Vec<u8> {
-        let mut frozen: Vec<(u64, Ladder)> = self.frozen.iter().map(|(k, v)| (*k, *v)).collect();
-        frozen.sort_by_key(|x| x.0);
         let snap = Snapshot {
             format: SNAPSHOT_FORMAT,
             config: self.config.clone(),
@@ -680,7 +682,6 @@ impl QueueState {
             pings: self.pings.iter().map(|((m, u), p)| (m.clone(), u.clone(), p.clone())).collect(),
             prefs: self.prefs.iter().map(|(a, p)| (a.clone(), p.clone())).collect(),
             serving: self.serving.iter().map(|((a, m), s)| (a.clone(), m.clone(), s.clone())).collect(),
-            frozen,
             dead: self.dead.iter().copied().collect(),
             revived: self.revived.iter().copied().collect(),
             arm_log: self.arm_log.iter().map(|(a, d)| (a.clone(), d.iter().copied().collect())).collect(),
@@ -710,7 +711,6 @@ impl QueueState {
         q.pings = s.pings.into_iter().map(|(m, u, p)| ((m, u), p)).collect();
         q.prefs = s.prefs.into_iter().collect();
         q.serving = s.serving.into_iter().map(|(a, m, v)| ((a, m), v)).collect();
-        q.frozen = s.frozen.into_iter().collect();
         q.dead = s.dead.into_iter().collect();
         q.revived = s.revived.into_iter().collect();
         q.arm_log = s.arm_log.into_iter().map(|(a, d)| (a, d.into_iter().collect())).collect();
@@ -745,10 +745,6 @@ impl QueueState {
         self.index_solve(&s);
         self.solves.insert(s.id, s);
     }
-    /// A position's ladder from rows that are not imported (folded).
-    pub fn import_ladder(&mut self, pos: u64, ladder: Ladder) {
-        self.frozen.insert(pos, ladder);
-    }
     pub fn import_dead(&mut self, pos: u64) {
         self.dead.insert(pos);
     }
@@ -768,12 +764,13 @@ impl QueueState {
     /// a generation below the position's visits (never revived, Q-6.8: every
     /// revive path works on `generation = visits`), served more than an hour
     /// ago (Q-2.19).  CANCELLED rows are kept (undo works on any of them,
-    /// Q-6.21).  `visits` returns the position's visit count.
-    pub(crate) fn prune(&mut self, now: Ms, visits: &dyn Fn(u64) -> i32) -> usize {
+    /// Q-6.21).  Their bought and searched rungs go to the position's ext
+    /// ladder (`Applied::ladder`: the writer writes them in the same batch).
+    pub(crate) fn prune(&mut self, now: Ms, env: &dyn crate::env::QueueEnv) -> usize {
         let cutoff = now - SERVED_WINDOW;
         let mut drop = Vec::new();
         for t in self.tasks.values() {
-            if t.state != TState::Completed || t.generation >= visits(t.pos) {
+            if t.state != TState::Completed || t.generation >= env.visits(t.pos) {
                 continue;
             }
             if t.completed.map(|c| c >= cutoff).unwrap_or(false) {
@@ -783,9 +780,10 @@ impl QueueState {
         }
         for id in &drop {
             let t = self.tasks[id].clone();
-            let l = self.frozen.entry(t.pos).or_default();
+            let base = env.ladder(t.pos);
+            let l = self.tx.ladder.entry(t.pos).or_insert(base);
+            l.merge(&base);
             l.fold(&t);
-            self.tx.frozen.insert(t.pos);
             self.drop_task(*id);
         }
         // Arm logs only matter for an hour.

@@ -98,6 +98,24 @@ fn main() {
     drop(order);
     drop(row_of);
 
+    // v1's stored priority (export column `priority`), for the queue's exact
+    // AUTO/FILL order: `<out>/v1prio.col`, 8 bytes per id (av2_model::record::V1PRIO_FILE).
+    let mut prio_map = if cols.has("priority") {
+        std::fs::create_dir_all(&out_dir).unwrap_or_else(|e| die(&e.to_string()));
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(out_dir.join(av2_model::record::V1PRIO_FILE))
+            .unwrap_or_else(|e| die(&e.to_string()));
+        f.set_len((n as u64).max(1) * 8).unwrap_or_else(|e| die(&e.to_string()));
+        Some(unsafe { memmap2::MmapMut::map_mut(&f) }.unwrap_or_else(|e| die(&e.to_string())))
+    } else {
+        None
+    };
+    let mut prio_nonzero = 0u64;
+
     // Pass 3: positions.
     let mut bl = BulkLoader::create(&out_dir, cfg, n as u64, edges.len() as u64).unwrap_or_else(|e| die(&e.to_string()));
     let mut rdr = export::reader(&pos_path).unwrap_or_else(|e| die(&e));
@@ -136,9 +154,20 @@ fn main() {
             None
         };
         bl.set_position(id_of[row], p.fp, p.core, ext, p.fen.as_deref()).unwrap_or_else(|e| die(&e.to_string()));
+        if let Some(m) = prio_map.as_mut() {
+            let v = export::v1_priority(&cols, &rec).unwrap_or(0.0);
+            if v != 0.0 {
+                prio_nonzero += 1;
+                let at = id_of[row] as usize * 8;
+                m[at..at + 8].copy_from_slice(&v.to_le_bytes());
+            }
+        }
         row += 1;
     }
     drop(fps);
+    if let Some(m) = prio_map.take() {
+        m.flush().unwrap_or_else(|e| die(&e.to_string()));
+    }
     let t_pos = t0.elapsed();
 
     // Out-edge blocks: by parent id, then edge id.
@@ -199,6 +228,7 @@ fn main() {
         ("bad_rows", bad_rows),
         ("ext_records", exts),
         ("blobs", blobs),
+        ("v1_priorities", prio_nonzero),
         ("blob_fens", blob_fens),
         ("duplicate_moves", dup_moves),
         ("multi_parent_children", multi_parent),

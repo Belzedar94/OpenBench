@@ -47,6 +47,10 @@ pub struct Settings {
     /// The test server enforces the engine gate (a policy file with
     /// `"mode": "enforce"`): run the `engine-not-accepted` scenario.
     pub gate_enforced: bool,
+    /// The server applies owner decision D8 (no lease for a build without
+    /// lease tokens): run the `upgrade-required` scenario.  v1 hands such a
+    /// build a tokenless lease, so the scenario only runs against v2.
+    pub decision_d8: bool,
     /// `engine_sha` sent with every normal submit (a reference binary's
     /// sha256 when the gate is on; empty otherwise, as a worker with
     /// `--engine` and no provenance sends).
@@ -653,6 +657,26 @@ fn solve_acquire(run: &mut Run) -> Outcome {
     }
 }
 
+/// D8 (api-contract section 10): a worker build older than 2026072203, or
+/// one that sends no build, gets `400 {"error": "upgrade-required"}` from the
+/// lease and nothing is leased; a current build still leases.
+fn upgrade_required(run: &mut Run) -> Outcome {
+    let machine = run.machine.clone();
+    for (step, build) in [("lease from a build without lease tokens", Some("2026072202")), ("lease without a build", None)] {
+        let mut form = run.auth(&machine);
+        form.retain(|(k, _)| k != "worker_build");
+        if let Some(b) = build {
+            form.push(("worker_build".into(), b.into()));
+        }
+        form.push(("lease_session".into(), "old-build".into()));
+        let (response, _) = run.post(step, "/atomicdb/api/lease", form)?;
+        run.expect_exact(step, &response, 400, r#"{"error": "upgrade-required"}"#)?;
+    }
+    run.seed(5)?;
+    let task = run.lease("a current build still leases", "session-a")?;
+    run.release_task("hand it back", &task, 1)
+}
+
 type Scenario = fn(&mut Run) -> Outcome;
 
 /// The scenarios and what each checks, in the order they run.
@@ -669,6 +693,7 @@ const SCENARIOS: &[(&str, Scenario, &str)] = &[
     ("auth-and-validation", auth_and_validation, "credentials, methods and malformed fields"),
     ("engine-not-accepted", engine_not_accepted, "the engine gate (needs --gate-enforced)"),
     ("solve-acquire", solve_acquire, "the SOLVE lease shape"),
+    ("upgrade-required", upgrade_required, "D8: no lease for a build without lease tokens (needs --decision-d8)"),
 ];
 
 /// Run the scenarios named in `only` (all when empty).
@@ -684,6 +709,16 @@ pub fn run_all(transport: &mut dyn Transport, settings: &Settings, only: &[Strin
                 passed: true,
                 skipped: true,
                 message: "skipped: the server's engine gate is off (pass --gate-enforced when it is on)".into(),
+                steps: 0,
+            });
+            continue;
+        }
+        if *name == "upgrade-required" && !settings.decision_d8 {
+            verdicts.push(Verdict {
+                scenario: name,
+                passed: true,
+                skipped: true,
+                message: "skipped: D8 is a v2 decision (pass --decision-d8 against v2)".into(),
                 steps: 0,
             });
             continue;
