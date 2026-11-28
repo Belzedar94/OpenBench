@@ -205,20 +205,22 @@ fn readers_run_without_locks_while_the_writer_commits() {
             let mut es = Vec::new();
             let mut ps = Vec::new();
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                r.read(|v| {
+                // The closure may see a batch half applied (it is then run
+                // again), so it only collects; the checks run on what a
+                // validated snapshot returned.
+                let (n, kids, pars) = r.read(|v| {
                     let n = v.len();
                     let id = PosId(rng.below(n));
                     es.clear();
                     v.children(id, &mut es);
-                    for e in &es {
-                        // A consistent snapshot never shows an edge to a position it does not have.
-                        assert!(e.child.0 < n, "edge to {} with {} positions", e.child.0, n);
-                    }
                     ps.clear();
                     v.parents(id, &mut ps);
-                    assert!(ps.iter().all(|p| p.0 < n));
                     let _ = v.core(id);
+                    (n, es.iter().map(|e| e.child.0).collect::<Vec<_>>(), ps.iter().map(|p| p.0).collect::<Vec<_>>())
                 });
+                // A consistent snapshot never shows an edge to a position it does not have.
+                assert!(kids.iter().all(|&c| c < n), "edge beyond {n}: {kids:?}");
+                assert!(pars.iter().all(|&p| p < n), "parent beyond {n}: {pars:?}");
                 reads += 1;
             }
             reads

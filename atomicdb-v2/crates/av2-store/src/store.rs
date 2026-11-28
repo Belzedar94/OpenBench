@@ -833,11 +833,20 @@ fn copy_prefix(src: &Path, dst: &Path, len: u64) -> Result<u64> {
 
 fn backup(sh: &Shared, dest: &Path) -> Result<BackupReport> {
     let t0 = Instant::now();
-    let s = sh.checkpoint_covering_now()?;
+    // Pin the log before the checkpoint: a later checkpoint of the background
+    // thread must not release the frames this copy will need (s >= now).
     {
+        let now = sh.applied.load(Ordering::Acquire);
         let mut p = sh.pin.lock().unwrap();
-        *p = Some(p.map_or(s + 1, |q| q.min(s + 1)));
+        *p = Some(p.map_or(now + 1, |q| q.min(now + 1)));
     }
+    let s = match sh.checkpoint_covering_now() {
+        Ok(s) => s,
+        Err(e) => {
+            *sh.pin.lock().unwrap() = None;
+            return Err(e);
+        }
+    };
     let res = (|| -> Result<BackupReport> {
         let gd = graph_dir(dest);
         let ld = log_dir(dest);
