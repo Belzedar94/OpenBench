@@ -278,10 +278,12 @@ moves, +128M nodes); climbing after each one or once with the merged seeds
 So with D2 the climb is batch-size independent on DAGs; v1's noise cut breaks
 it in 0.5% of small dense cases, and the loop rules break it on their own
 (the spine cache and the loop walks read pointers in the order levels decide
-them, LOOP-1.1 "Determinism").  Batch-size independence on graphs with loops
-needs more than D2: an owner decision for after the exact port (options:
-accept it, as v1 does with its sweep; or make the loop rules read only
-stored pointers, which changes results).  Termination: on any graph, cycles
+them, LOOP-1.1 "Determinism").  **Owner decision (28-Nov): accepted, as v1
+accepts it.**  v2's log records every batch's boundaries, so a replay applies
+the same inputs in the same batches and is deterministic whatever the batch
+sizes were; what is not promised is that a different batching of the same
+inputs ends in the same backed columns on graphs with loops (on DAGs with D2
+it does).  Termination: on any graph, cycles
 included, every climb ends within the level bound and an ascent cut by a
 bound reports a `BACKED_GUARD` event (property test, 300 cases).
 
@@ -327,10 +329,35 @@ bite).  The 4 left are the largest and longest batches of the sample (v1
 took 0.8 to 6.5 s and read 2,300 to 15,000 positions; the clean ones
 p50 144 ms and 194 positions); their differences are ties between moves of
 equal value and the plies and support that follow (one family also 986 vs
-968).  Not yet explained: candidates are rows another transaction committed
-while v1's batch ran (READ COMMITTED, the races the rechecks exist for),
-and the row and parent orders that D3 fixes by id.  The shim's adapters
-should pass `V1Loops::default()` once this stack merges.
+968).
+
+**The 4 explained (28-Nov, from the case files).**  Each case records v1's
+commits in order: the climb's own commit first, then the commits of the
+post-commit rechecks (CAS-6.1 landing recheck, CAS-6.4 meeting points),
+which re-read rows after the climb and repair what they find stale.  For
+every differing row of all four cases, **v1's first commit holds exactly
+v2's values**; the differences are written by the later commits (8, 10, 2
+and 2 commits in the four cases):
+
+| Case | v1's climb (commit 0) | Later v1 commits | Why the recheck rewrote it |
+|---|---|---|---|
+| `d1decd` (6.5 s, 15,353 positions) | 5 rows = v2 (968 ...) | commits 1-6: 986, 1054 via g4g5 | a landing on `9761d84e` committed during the batch (its eval 844 -> 1054, nodes 0 -> 128M between two reads, queries 17 and 364); the rechecks read it |
+| `878fae` (2.5 s, 7,282) | 6 rows = v2 | commits 1-7 | stale rows after the climb: sub-epsilon changes (BKD-8.1, the noise cut) left parents on a sibling; the meeting-point recheck re-decided them, one level at a time |
+| `a2e664` (0.8 s, 2,321) | `a16e6fda` = v2 (1266, b7h1, 3 plies, 128000304) | commit 1: (1266, b7c6, 5, 128000427) | its child via b7c6 moved 1262 -> 1266 with the same move: below the noise cut, and `a16e6fda` stood on b7h1, so the climb did not wake it; the recheck (a `stale_backed_rows` of the climb's keys, queries 257-288) did |
+| `9a561c` (1.3 s, 3,343) | `c1779036` = v2 | commit 1 | a landing expanded and searched `3f7e306f` during the batch (unexpanded -> expanded, eval null -> 1934, queries 5 and 365); the recheck read it |
+
+How it was checked: (1) a probe over the case files listed, for every row,
+the columns whose value changed between two reads of the same batch on
+columns the batch never writes (or rows it never writes): 6 of the 158
+cases have such changes, including `d1decd` and `9a561c`; (2) replaying
+with ids assigned in v1's key order instead of the loader's order (D3) gives
+the same 4 cases and the same 54 field differences, so row order is not the
+cause; (3) the per-commit view above.  **No port bug**: v2 reproduces v1's
+climb in all 158 cases; what remains is v1's post-commit repair, which v2's
+single writer does not need for races (CAS-6 is not ported, spec section 16
+step 15) and which, for staleness left by the noise cut, D2 makes
+unnecessary.  The shim's report keeps the full comparison, with these four
+as known recheck effects.  The shim's adapters now pass `V1Loops::default()`.
 
 ## Benchmark: climbs on the production slice
 
