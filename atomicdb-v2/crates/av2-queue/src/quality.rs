@@ -49,6 +49,18 @@ impl QualityBuyer<'_> {
     pub fn finish(self) -> (Vec<Delta>, Vec<Event>) {
         self.q.finish()
     }
+
+    /// Finish and return the fact to log for the purchases (`queue.v1`,
+    /// input `Purchases`), or `None` when nothing changed.
+    pub fn finish_fact(self) -> Option<av2_facts::Fact> {
+        let now = self.now;
+        let (deltas, events) = self.finish();
+        if deltas.is_empty() && events.is_empty() {
+            return None;
+        }
+        let applied = crate::apply::Applied { output: crate::input::Output::Ok, deltas, events };
+        Some(crate::fact::record(&crate::input::Input::Purchases { now }, &applied))
+    }
 }
 
 impl TaskSink for QualityBuyer<'_> {
@@ -121,6 +133,20 @@ mod tests {
         let t = q.slot(7, 0).unwrap();
         assert_eq!((t.budget, t.source, t.arm.as_str(), t.state), (512_000_000, Source::Fill, ARM_QUALITY, TState::Pending));
         assert_eq!(q.pending_of_arm(ARM_QUALITY), 2);
+    }
+
+    #[test]
+    fn the_purchases_fact_rebuilds_the_queue() {
+        let mut q = QueueState::new(QueueConfig::default());
+        let fact = {
+            let mut b = q.quality_buyer(2_000);
+            b.buy(&buy(9, 2, 512_000_000));
+            b.finish_fact().expect("something changed")
+        };
+        let mut rebuilt = QueueState::new(QueueConfig::default());
+        assert_eq!(crate::fact::replay(&mut rebuilt, [&fact]).unwrap(), 1);
+        assert_eq!(rebuilt.digest(), q.digest());
+        assert!(q.quality_buyer(3_000).finish_fact().is_none());
     }
 
     #[test]
