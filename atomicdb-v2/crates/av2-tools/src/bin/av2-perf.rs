@@ -397,7 +397,9 @@ fn main() {
             let (rps, lat) = readers_from(s.reader(), th, secs, fps.clone());
             emit(
                 &out,
-                &format!("{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"reader\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"),
+                &format!(
+                    "{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"reader\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"
+                ),
             );
         }
         let mapped = s.maps_snapshot();
@@ -405,7 +407,9 @@ fn main() {
             let (rps, lat) = readers_mem(mapped.clone(), th, secs, fps.clone());
             emit(
                 &out,
-                &format!("{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"view\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"),
+                &format!(
+                    "{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"view\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"
+                ),
             );
         }
         let t = Instant::now();
@@ -415,7 +419,9 @@ fn main() {
             let (rps, lat) = readers_mem(mem.clone(), th, secs, fps.clone());
             emit(
                 &out,
-                &format!("{{\"stage\":\"explore\",\"backing\":\"anonymous\",\"via\":\"view\",\"copy_ms\":{copy_ms:.0},\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"),
+                &format!(
+                    "{{\"stage\":\"explore\",\"backing\":\"anonymous\",\"via\":\"view\",\"copy_ms\":{copy_ms:.0},\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"
+                ),
             );
         }
         drop(s);
