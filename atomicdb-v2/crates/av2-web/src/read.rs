@@ -433,6 +433,60 @@ pub struct TreeTotals {
     pub cores: u32,
 }
 
+// ---------------------------------------------------------------- feeds
+
+/// One notice of the bell and the notifications page (v1
+/// `RequestNotification`, as `notifications.identity` words it).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Notice {
+    pub key: String,
+    #[serde(default)]
+    pub play: String,
+    pub san: String,
+    pub full: String,
+    /// Already worded (`3 hours ago`).
+    pub ago: String,
+    pub seen: bool,
+}
+
+/// A signed-in account's notices: the unseen count and the latest rows.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Notices {
+    pub unseen: u32,
+    pub rows: Vec<Notice>,
+}
+
+/// One event of the milestones feed (v1 `DBEvent`).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Milestone {
+    pub ts: i64,
+    pub text: String,
+    pub san: Option<String>,
+    pub full: Option<String>,
+    pub key: Option<String>,
+}
+
+/// How far a proposed campaign's line reaches (v1 `proposed_campaigns.stored`).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Reach {
+    /// The count stopped at its cap: numbers are lower bounds.
+    pub capped: bool,
+    pub total: u64,
+    pub explored: u64,
+    pub resolved: u64,
+    pub solved_pct: f64,
+    /// Already worded (`4 hours, 14 minutes`).
+    pub measured_ago: Option<String>,
+}
+
+/// Proof numbers of a proposed campaign's root.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct CampaignProof {
+    pub proven: bool,
+    pub refuted: bool,
+    pub pn: Option<u64>,
+    pub dn: Option<u64>,
+}
 // ---------------------------------------------------------------- home
 
 /// A running community campaign (v1 `_campaign_context` cards).
@@ -460,6 +514,10 @@ pub struct CampaignRow {
     pub line_shown: String,
     pub proposed_by: String,
     pub votes: u64,
+    #[serde(default)]
+    pub reach: Option<Reach>,
+    #[serde(default)]
+    pub proof: Option<CampaignProof>,
 }
 
 /// A line of the "Now analyzing" / "Up next" feeds (v1 home `analyzing`,
@@ -561,6 +619,8 @@ pub enum PageKind {
     Queue,
     Contributors,
     Map,
+    Milestones,
+    Campaigns,
     /// Pages that change only with a deploy (docs).
     Static,
 }
@@ -592,6 +652,12 @@ pub trait SiteRead: Send + Sync {
     fn workers(&self) -> WorkersView;
     fn totals(&self) -> TreeTotals;
     fn home(&self) -> HomeView;
+    /// The latest events, newest first (v1 shows 12).
+    fn milestones(&self) -> Vec<Milestone>;
+    /// Every proposed campaign, most voted first.
+    fn campaigns(&self) -> Vec<CampaignRow>;
+    /// The notices of account `user_id` (bell and notifications page).
+    fn notices(&self, user_id: i64) -> Notices;
     /// The live request of a position, as `api/live-request` returns it.
     fn live_request(&self, key: &str) -> Option<LiveRequest>;
 }

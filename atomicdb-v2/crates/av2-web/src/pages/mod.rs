@@ -9,6 +9,7 @@ pub mod backlog;
 pub mod contributors;
 pub mod docs;
 pub mod explore;
+pub mod feeds;
 pub mod home;
 pub mod map;
 pub mod queue;

@@ -210,6 +210,7 @@ fn identity(state: &AppState, h: &HeaderMap, uri: &Uri) -> Identity {
         && let Some(s) = cookie(c, "sessionid")
     {
         id.user = state.sessions.user(s);
+        id.notices = id.user.as_ref().map(|u| state.site.notices(u.id));
     }
     id
 }
@@ -489,6 +490,63 @@ async fn home(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body>
     serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![root]))
 }
 
+async fn milestones(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    fn render(s: &AppState, _: &Req) -> (Page, StatusCode) {
+        (pages::feeds::milestones(s.site.milestones()), StatusCode::OK)
+    }
+    let route = Route { kind: PageKind::Milestones, render, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![]))
+}
+
+async fn campaigns(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    fn render(s: &AppState, _: &Req) -> (Page, StatusCode) {
+        (pages::feeds::campaigns(s.site.campaigns()), StatusCode::OK)
+    }
+    let route = Route { kind: PageKind::Campaigns, render, output: Output::Html, policy: Policy::Fresh };
+    serve(&s, &h, &uri, route, req(&uri, HashMap::new(), vec![]))
+}
+
+/// `notifications/`: one account's page, never cached; anonymous visitors
+/// are sent to sign in, as v1 does.
+async fn notifications(State(s): State<Shared>, h: HeaderMap, uri: Uri) -> Response<Body> {
+    let started = Instant::now();
+    let id = identity(&s, &h, &uri);
+    let Some(user) = id.user else {
+        return Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "/login/?next=/atomicdb/notifications/")
+            .body(Body::empty())
+            .unwrap_or_default();
+    };
+    let page = pages::feeds::notifications(s.site.notices(user.id));
+    let path = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
+    let c = build(&s, page, 0, StatusCode::OK, &path, Output::Html);
+    respond(&s, &h, &uri, &c, started)
+}
+
+/// `sitemap.xml` (v1 `views.sitemap`): the overview pages, the docs and every
+/// named opening present in the tree.
+async fn sitemap(State(s): State<Shared>) -> Response<Body> {
+    let origin = &s.assets.origin;
+    let mut xml =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    let mut add = |path: &str| xml.push_str(&format!("  <url><loc>{origin}{path}</loc></url>\n"));
+    for p in ["/atomicdb/", "/atomicdb/roots/", "/atomicdb/docs/"] {
+        add(p);
+    }
+    for (slug, _) in pages::docs::PAGES {
+        add(&format!("/atomicdb/docs/{slug}/"));
+    }
+    for o in s.site.roots().openings.iter().filter(|o| o.present) {
+        add(&format!("/atomicdb/explore/{}/", o.key));
+    }
+    xml.push_str("</urlset>\n");
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/xml")
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(Body::from(xml))
+        .unwrap_or_default()
+}
 async fn static_file(State(s): State<Shared>, Path(path): Path<String>, h: HeaderMap, uri: Uri) -> Response<Body> {
     let Some(f) = s.statics.get(&path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -522,6 +580,10 @@ pub fn router(state: Shared) -> Router {
         .route("/atomicdb/queue/", get(queue))
         .route("/atomicdb/contributors/", get(contributors))
         .route("/atomicdb/map/", get(map))
+        .route("/atomicdb/milestones/", get(milestones))
+        .route("/atomicdb/campaigns/", get(campaigns))
+        .route("/atomicdb/notifications/", get(notifications))
+        .route("/atomicdb/sitemap.xml", get(sitemap))
         .route("/atomicdb/docs/", get(docs))
         .route("/atomicdb/docs/{slug}/", get(docs))
         .route("/atomicdb/api/live-request/{key}/", get(live_request))
@@ -801,6 +863,55 @@ mod tests {
             }
         }
         panic!("the background rebuild never landed");
+    }
+    #[tokio::test]
+    async fn more_pages_render() {
+        let (app, _) = app();
+        for (uri, needle) in [
+            ("/atomicdb/milestones/", "Solved: WHITE_WIN via MINIMAX"),
+            ("/atomicdb/campaigns/", "positions to prove a White win"),
+            ("/atomicdb/docs/", "AtomicDB documentation"),
+            ("/atomicdb/docs/queue/", "docs-pager"),
+            ("/atomicdb/sitemap.xml", "/atomicdb/docs/api/"),
+            ("/atomicdb/roots/", "root-chart-svg"),
+            ("/atomicdb/roots/", "Main line by day"),
+            ("/atomicdb/queue/", "Community backlog"),
+            ("/atomicdb/", "Proposed campaigns"),
+        ] {
+            let r = get(&app, uri, &[]).await;
+            assert_eq!(r.status(), StatusCode::OK, "{uri}");
+            assert!(text(r).await.contains(needle), "{uri}: {needle}");
+        }
+        let r = get(&app, "/atomicdb/docs/nope/", &[]).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let r = get(&app, "/atomicdb/notifications/", &[]).await;
+        assert_eq!(r.status(), StatusCode::FOUND, "anonymous visitors sign in first");
+    }
+
+    struct OneUser;
+    impl Sessions for OneUser {
+        fn user(&self, key: &str) -> Option<User> {
+            (key == "s1").then(|| User { id: 7, username: "belzedar".into(), is_staff: false })
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_in_visitor_gets_bell_and_account_parts() {
+        let site = Arc::new(FixtureSite::load().unwrap());
+        let app = router(state(site, Arc::new(OneUser), FsPath::new("does-not-exist"), "https://example.org"));
+        let cookie = [("cookie", "sessionid=s1")];
+        let home = text(get(&app, "/atomicdb/", &cookie).await).await;
+        assert!(home.contains("identity-user") && home.contains("belzedar"));
+        assert!(home.contains("class=\"bell-badge\"") && home.contains("Your analysis of <b>1. Nf3</b> is ready"));
+        let anon = text(get(&app, "/atomicdb/", &[]).await).await;
+        assert!(anon.contains("Sign in") && !anon.contains("bell-badge"), "the anonymous copy is untouched");
+        let queue = text(get(&app, "/atomicdb/queue/", &cookie).await).await;
+        assert!(queue.contains(">Adopt 10<"), "adopt buttons for an account");
+        let queue_anon = text(get(&app, "/atomicdb/queue/", &[]).await).await;
+        assert!(!queue_anon.contains(">Adopt 10<") && queue_anon.contains("to adopt a batch"));
+        let r = get(&app, "/atomicdb/notifications/", &cookie).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(text(r).await.contains("notif-row unseen"));
     }
     #[test]
     fn negotiation() {

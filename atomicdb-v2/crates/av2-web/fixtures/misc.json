@@ -1,0 +1,679 @@
+{
+ "milestones": [
+  {
+   "ts": 1795852260,
+   "text": "Solved: WHITE_WIN via MINIMAX",
+   "san": "…",
+   "full": "…",
+   "key": "a2b0b55a6940002124ddd1d561636cce6a1d42c61eebf064af94150bae89b140"
+  },
+  {
+   "ts": 1795852260,
+   "text": "SEEDED",
+   "san": "…",
+   "full": "…",
+   "key": "a2b0b55a6940002124ddd1d561636cce6a1d42c61eebf064af94150bae89b140"
+  },
+  {
+   "ts": 1795852260,
+   "text": "Solved: WHITE_WIN via MINIMAX",
+   "san": "…",
+   "full": "…",
+   "key": "9379a150fd0b35084e62795aaedd39cfd176535556c0a3054b2a6bd5da13d6ed"
+  },
+  {
+   "ts": 1795852260,
+   "text": "SEEDED",
+   "san": "…",
+   "full": "…",
+   "key": "9379a150fd0b35084e62795aaedd39cfd176535556c0a3054b2a6bd5da13d6ed"
+  },
+  {
+   "ts": 1795852260,
+   "text": "SEEDED",
+   "san": "…",
+   "full": "…",
+   "key": "fdacaf02f0b2bd819d3222e5a52dc2282363b185fdfcafc2fbd3ef1651385d47"
+  },
+  {
+   "ts": 1795852260,
+   "text": "SEEDED",
+   "san": "…",
+   "full": "…",
+   "key": "c076f219ed497bf21925bc831eeea10e0df0a9b530e099dd5278e56546c8441d"
+  },
+  {
+   "ts": 1795852260,
+   "text": "Solved: WHITE_WIN via MINIMAX",
+   "san": "… Rb7",
+   "full": "… Rb7",
+   "key": "0e022002af191f600edd3675bf2bf6cb14096bfaf6d86b3a8ee18bf54022402a"
+  },
+  {
+   "ts": 1795852260,
+   "text": "SEEDED",
+   "san": "…",
+   "full": "…",
+   "key": "60edfc288a52c28aff8ad6d2da3b6bda805833a65a931b56f64a96664e11d8c5"
+  },
+  {
+   "ts": 1795852260,
+   "text": "Solved: WHITE_WIN via MATE_PV",
+   "san": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8 Kf7 Qf5 Kg7",
+   "full": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8 Kf7 Qf5 Kg7",
+   "key": "d1cd703896a32929841d4e4e0b4008f0021aa1fff6c095ef789c5491ad108de7"
+  },
+  {
+   "ts": 1795852260,
+   "text": "Solved: WHITE_WIN via MATE_PV",
+   "san": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8 Kf7 Qf5",
+   "full": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8 Kf7 Qf5",
+   "key": "1e8798c62098369389559b6e003d27368f79911af3bfd157dc37f62b64b18b7d"
+  },
+  {
+   "ts": 1795852260,
+   "text": "Solved: WHITE_WIN via MATE_PV",
+   "san": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8 Kf7",
+   "full": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8 Kf7",
+   "key": "466964a83da3eb0ba1cccd974916bb5486f72bae96fb696f2ed41d8de6a7921b"
+  },
+  {
+   "ts": 1795852260,
+   "text": "Solved: WHITE_WIN via MATE_PV",
+   "san": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8",
+   "full": "… Rb7 f7 Rc7 Qg4 Re8 f8=Q Rxf8 Rf8 Kg7 Rh8",
+   "key": "c84c32e04a48cc4516b35a54b1b74ed19c89af807c7ba15dc541096963362072"
+  }
+ ],
+ "campaigns": [
+  {
+   "id": 2,
+   "root_key": "025e0b7321202fe56334280db7e4c4582fe2408a61ee8871c4250b169402cf82",
+   "title": "exd5 idea op, might be easier solve than 2N somehow",
+   "line_shown": "1. Nf3 f6 2. e4",
+   "proposed_by": "Wolfram",
+   "votes": 8,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 24041,
+    "resolved": 9649,
+    "solved_pct": 3.2,
+    "measured_ago": "4 hours, 14 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 59,
+    "dn": 105
+   }
+  },
+  {
+   "id": 8,
+   "root_key": "414da5b0537f0ed75001fc1a266fba995ec2d250c6ea0345fd3c4f6ddb7d42d4",
+   "title": "Is Nh3 h6 e3 e6 Nc3 a draw?",
+   "line_shown": "1. Nh3 e6 2. e3 h6 3. Nc3",
+   "proposed_by": "soothdest",
+   "votes": 7,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 19410,
+    "resolved": 8459,
+    "solved_pct": 2.8,
+    "measured_ago": "4 hours"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 2097746,
+    "dn": 3
+   }
+  },
+  {
+   "id": 1,
+   "root_key": "7e3479415bd3cd412c939e5d862ea7bc8282c61497e0946fa85a953577ae51e1",
+   "title": "Pls nh4 is more solvable than c3",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. Nc3 c6 4. Nb5 cxb5 5. Bb5 Nc6 6. d4 g6 7. Nh4",
+   "proposed_by": "67king",
+   "votes": 6,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 13170,
+    "resolved": 3914,
+    "solved_pct": 1.3,
+    "measured_ago": "4 hours, 15 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 1048713,
+    "dn": 16
+   }
+  },
+  {
+   "id": 12,
+   "root_key": "d81709eb2b95e240676295161c23b365840b3f6e6b25c02b6703329f6fc0f5f0",
+   "title": "The weaker of the two f-pawn advances for 1. ...d6",
+   "line_shown": "1. Nf3 d6 2. Ng5 f5 3. Nf7 Qd7 4. e4",
+   "proposed_by": "MoNiKaMaDnEsS",
+   "votes": 5,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 22935,
+    "resolved": 15997,
+    "solved_pct": 5.3,
+    "measured_ago": "3 hours, 50 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 106,
+    "dn": 164
+   }
+  },
+  {
+   "id": 7,
+   "root_key": "bef3e10f91b3b3fa1c38801038c9e95a4d128027c57396cff0bfee5edec42b02",
+   "title": "While this is no mate eval, no chances to solve atomic?",
+   "line_shown": "1. Nf3 f6 2. Nc3 Nc6",
+   "proposed_by": "wolfie",
+   "votes": 5,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 32479,
+    "resolved": 10098,
+    "solved_pct": 3.4,
+    "measured_ago": "4 hours, 4 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 5,
+    "dn": 78
+   }
+  },
+  {
+   "id": 27,
+   "root_key": "67dfc5a4f3caf9afabd3e61f191dabc7c76705ab98b37cc5b844157e245a543f",
+   "title": "Let's solve the 2N Nh6, exf5 mainline with quasa and eclipsia",
+   "line_shown": "1. Nc3 f5 2. Nf3 e5 3. Ng5 Bb4 4. g4 Nh6 5. d4 c6 6. e4 fxe4 7. h4 d5 8. Qe2 Nxg4 9. f3 Bg4 10. Bh3",
+   "proposed_by": "soothdest",
+   "votes": 3,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 28715,
+    "resolved": 23910,
+    "solved_pct": 8.0,
+    "measured_ago": "3 hours, 37 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 4,
+    "dn": 248
+   }
+  },
+  {
+   "id": 26,
+   "root_key": "0cb11667329079b3bed172e239be2955a591a75993b91493a58ef76796c961c1",
+   "title": "Trust this would help us solve atomic...",
+   "line_shown": "…",
+   "proposed_by": "Void",
+   "votes": 3,
+   "reach": {
+    "capped": false,
+    "total": 9076,
+    "explored": 402,
+    "resolved": 102,
+    "solved_pct": 1.1,
+    "measured_ago": "3 hours, 38 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 22,
+    "dn": 144
+   }
+  },
+  {
+   "id": 18,
+   "root_key": "c2dcd427915e8205d53f904f94c07d84b03f29c0cc23cad181aea71645ef6cbb",
+   "title": "Refuting 1... d6",
+   "line_shown": "1. Nf3 d6 2. Nc3",
+   "proposed_by": "randomchampgamer",
+   "votes": 3,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 24995,
+    "resolved": 11351,
+    "solved_pct": 3.8,
+    "measured_ago": "3 hours, 48 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 102,
+    "dn": 102
+   }
+  },
+  {
+   "id": 9,
+   "root_key": "7d457be8e003fe7c4fe2a294c1858fb0e6053a8eee5ca0067c872ae1df0386b6",
+   "title": "Let's solve Qc8 in 2N Nh6 mainline and/or use it as a benchmark",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. d4 c6 4. Nc3 Nh6 5. g4 Bb4 6. e5 fxe5 7. Ng5 d5 8. h4 e5 9. Qe2 Nxg4 10. f3 Bg4 11. Bh3 Qc8 12. Bh6",
+   "proposed_by": "soothdest",
+   "votes": 3,
+   "reach": {
+    "capped": false,
+    "total": 1,
+    "explored": 1,
+    "resolved": 1,
+    "solved_pct": 100.0,
+    "measured_ago": "4 hours"
+   },
+   "proof": {
+    "proven": true,
+    "refuted": false,
+    "pn": null,
+    "dn": null
+   }
+  },
+  {
+   "id": 4,
+   "root_key": "147aa8a0e494eb6e41126ae581c5140426351e39866225179f6dd28b1c636ea9",
+   "title": "Alternative middlegame-only approach",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. Nc3 c6 4. Nb5 cxb5 5. Bb5 Nc6 6. d4 h5 7. Rg1",
+   "proposed_by": "Wolfram",
+   "votes": 3,
+   "reach": {
+    "capped": false,
+    "total": 18095,
+    "explored": 595,
+    "resolved": 149,
+    "solved_pct": 0.8,
+    "measured_ago": "4 hours, 11 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 64,
+    "dn": 4
+   }
+  },
+  {
+   "id": 3,
+   "root_key": "56d05151643512d0e77c031363377ef376aff19ebc0dc5ef7ad012a20b7f4a55",
+   "title": "Complex Q imbalances, can crack both lesha and O-O spams",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. Nc3 c6 4. Nb5 cxb5 5. Bb5 Nc6 6. O-O g6 7. d4",
+   "proposed_by": "Wolfram",
+   "votes": 3,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 16426,
+    "resolved": 3602,
+    "solved_pct": 1.2,
+    "measured_ago": "4 hours, 11 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 95,
+    "dn": 47
+   }
+  },
+  {
+   "id": 28,
+   "root_key": "b723d1552874149b36a3166c5239847e14561bf2c1df4e2b6870ef19fa3e561e",
+   "title": "kek join me in analyzing this and strengthening its theory or sm",
+   "line_shown": "1. Nf3 f6 2. Na3",
+   "proposed_by": "rhaxier",
+   "votes": 1,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 34153,
+    "resolved": 10643,
+    "solved_pct": 3.5,
+    "measured_ago": "3 hours, 35 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 85,
+    "dn": 52
+   }
+  },
+  {
+   "id": 23,
+   "root_key": "25e93feb7e279d38f92407f9636dc1ad7f443e6e9a4f3c57d3cc289063f683d3",
+   "title": "solve nf3 e3 e6?",
+   "line_shown": "1. Nf3 f6 2. e3 e6",
+   "proposed_by": "whatismymainbro",
+   "votes": 1,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 22755,
+    "resolved": 8713,
+    "solved_pct": 2.9,
+    "measured_ago": "3 hours, 40 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 22,
+    "dn": 143
+   }
+  },
+  {
+   "id": 22,
+   "root_key": "83083817f99699882950c0e6a6b3d8b7e1e9b125ea33e6676e413363773d5272",
+   "title": "Solve Qb6 Qxb2 defense against Nd4 Exchange variation",
+   "line_shown": "1. Nf3 f6 2. Ne5 Nh6 3. Nc3 Ng4 4. Nxg4 c6 5. e4 Qb6 6. d4 Qxb2 7. Qg4",
+   "proposed_by": "soothdest",
+   "votes": 1,
+   "reach": {
+    "capped": false,
+    "total": 1,
+    "explored": 1,
+    "resolved": 1,
+    "solved_pct": 100.0,
+    "measured_ago": "3 hours, 43 minutes"
+   },
+   "proof": {
+    "proven": true,
+    "refuted": false,
+    "pn": null,
+    "dn": null
+   }
+  },
+  {
+   "id": 20,
+   "root_key": "b1513b7dc900fa5400254a8a8037cc64fcad0fc87a77710cec44e5ab9a00a1cc",
+   "title": "Even tho 4. Nf7 has better eval, 4. Ne6 transpo to 2. Bh3 lines",
+   "line_shown": "1. Nf3 f6 2. Nd4 d6 3. Ne6 Bd7 4. Nc3 Bxe6",
+   "proposed_by": "randomchampgamer",
+   "votes": 1,
+   "reach": {
+    "capped": false,
+    "total": 154198,
+    "explored": 18222,
+    "resolved": 15807,
+    "solved_pct": 10.3,
+    "measured_ago": "3 hours, 43 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 1,
+    "dn": 282
+   }
+  },
+  {
+   "id": 19,
+   "root_key": "cda124027efb88b682cc5b8e2565cc2bea6e3fcf5d8c53cef97f4b91ceac450e",
+   "title": "1. Nf3 f6 2. e4 e6 3. Nc3 c6 … 5. d4 Nc6 6. Bb5 h5 7. c3",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. Nc3 c6 … 5. d4 Nc6 6. Bb5 h5 7. c3 Nh6 8. Ne5 fxe5 9. Bg5 Qf6 10. f4 Ng4 11. f5 Qxg5 12. Qxh5 g5 13. h3",
+   "proposed_by": "MoKy1978",
+   "votes": 1,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 18187,
+    "resolved": 3147,
+    "solved_pct": 1.0,
+    "measured_ago": "3 hours, 45 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 267,
+    "dn": 28
+   }
+  },
+  {
+   "id": 17,
+   "root_key": "0d984e9361de2ca5593355731d75206d6660db02dcbcac821186610b4613a510",
+   "title": "Last position needed to refute 1. Nf3 d6 2. Nc3 c5",
+   "line_shown": "1. Nf3 f6 2. Nc3 d6 3. Nd5 e6 4. Ng5 c5 5. Nc7 Qxc7 6. Nxh7",
+   "proposed_by": "randomchampgamer",
+   "votes": 1,
+   "reach": {
+    "capped": false,
+    "total": 1,
+    "explored": 1,
+    "resolved": 1,
+    "solved_pct": 100.0,
+    "measured_ago": "3 hours, 49 minutes"
+   },
+   "proof": {
+    "proven": true,
+    "refuted": false,
+    "pn": null,
+    "dn": null
+   }
+  },
+  {
+   "id": 10,
+   "root_key": "8449e6aa479cce8f99e2d07c15e420553f8a7f0e3a6d1991312e539b27d13937",
+   "title": "e. bb4 draw attempt",
+   "line_shown": "1. Nh3 e6 2. e3 c6 3. Bb5 h6 … Qf4 8. f3 Qxe5 9. O-O a5 10. Ba6 bxa6 11. Nb5 Kf8 12. Nc7 Na6 13. c3 Rb8 14. b3 Ba3 15. Bxa3 Nc5",
+   "proposed_by": "Catsareverycute",
+   "votes": 1,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 13084,
+    "resolved": 1964,
+    "solved_pct": 0.7,
+    "measured_ago": "3 hours, 56 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 46,
+    "dn": 72
+   }
+  },
+  {
+   "id": 25,
+   "root_key": "6cddd79defdce150420cbe54ae362649c6f607035fd69949460eb220b66361c3",
+   "title": "bruh, Biggest Floppa have never played that BS",
+   "line_shown": "1. g4 e6 2. Nf3 f6 3. Nc3 c6 4. d4 Nh6 5. e4 Bb4 6. e5 fxe5 7. Ng5 d5 8. h4 e5 9. Qe2 Nxg4 10. f3 Qe7",
+   "proposed_by": "GoRoArmeT",
+   "votes": 0,
+   "reach": {
+    "capped": false,
+    "total": 1,
+    "explored": 1,
+    "resolved": 1,
+    "solved_pct": 100.0,
+    "measured_ago": "3 hours, 38 minutes"
+   },
+   "proof": {
+    "proven": true,
+    "refuted": false,
+    "pn": null,
+    "dn": null
+   }
+  },
+  {
+   "id": 24,
+   "root_key": "610e646a521d2cf6d1b6006aefcb9643a6a9b297a01b82e23882031fe9f06efd",
+   "title": "Want to see if this is winnable for black",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. Na3 c6 4. Nb5 cxb5 5. Bb5 Nc6 6. O-O Qa5 7. Ng5 fxg5 8. Qh5 g6 9. Qe5 Bd6 10. Bxc6 Qxe5",
+   "proposed_by": "anonymously1234",
+   "votes": 0,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 15141,
+    "resolved": 1141,
+    "solved_pct": 0.4,
+    "measured_ago": "3 hours, 38 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 18,
+    "dn": 39
+   }
+  },
+  {
+   "id": 21,
+   "root_key": "41fe422a4d8592ee772331c51710eb92a26bf5f31fca228fd8163d9856d362f0",
+   "title": "…",
+   "line_shown": "",
+   "proposed_by": "Nameless",
+   "votes": 0,
+   "reach": {
+    "capped": false,
+    "total": 1,
+    "explored": 0,
+    "resolved": 1,
+    "solved_pct": 100.0,
+    "measured_ago": "3 hours, 43 minutes"
+   },
+   "proof": null
+  },
+  {
+   "id": 16,
+   "root_key": "4e0cf697e5fa4aeca91ae8d4176e0f21bbae6843ea64358fa7999fc50601fa9c",
+   "title": "A hole on the black side-Endgame",
+   "line_shown": "1. Nf3 f6 2. e4 e6 3. Ne5 fxe5 4. Qh5 g6 5. Qe5 c6 6. Qc7 Qxc7",
+   "proposed_by": "anonymous",
+   "votes": 0,
+   "reach": {
+    "capped": false,
+    "total": 5191,
+    "explored": 182,
+    "resolved": 23,
+    "solved_pct": 0.4,
+    "measured_ago": "3 hours, 49 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 27,
+    "dn": 35
+   }
+  },
+  {
+   "id": 15,
+   "root_key": "3ca589e4cb149074eee2dff436e64a2b38a88bde1480db313dab2c66b25802a3",
+   "title": "Likely forced mate line to be closed off",
+   "line_shown": "1. Nf3 f6 2. Nc3 c5 3. Nd5 e6 4. Nc7 Qxc7 5. Ne5 fxe5 6. e3 Nf6",
+   "proposed_by": "RohanisBoss",
+   "votes": 0,
+   "reach": {
+    "capped": false,
+    "total": 1,
+    "explored": 1,
+    "resolved": 1,
+    "solved_pct": 100.0,
+    "measured_ago": "3 hours, 49 minutes"
+   },
+   "proof": {
+    "proven": true,
+    "refuted": false,
+    "pn": null,
+    "dn": null
+   }
+  },
+  {
+   "id": 14,
+   "root_key": "7e8f44d6ad9bfdbaf0b1ad4da857d432a5e40ed24d9a2974ecfcc00158b2bb2a",
+   "title": "1. Nf3 f6 2. Nd4 d6 3. Ne6 c5 4. Nc3",
+   "line_shown": "",
+   "proposed_by": "RohanisBoss",
+   "votes": 0,
+   "reach": {
+    "capped": false,
+    "total": 336,
+    "explored": 35,
+    "resolved": 41,
+    "solved_pct": 12.2,
+    "measured_ago": "3 hours, 49 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 1,
+    "dn": 87
+   }
+  },
+  {
+   "id": 13,
+   "root_key": "7c0cd9fce8163ab627e90764012a321f500c1ab85f8f4f1234d4dd205dd9e14a",
+   "title": "More forcing than current PV 16. f3",
+   "line_shown": "1. Nf3 f6 2. e4 c6 3. Nc3 g6 … 8. Kh1 axb5 9. Bg5 Bh6 10. Ne5 Bg4 11. Qd3 Qc8 12. Qh3 Qd8 13. Nf7 Qc8 14. Qc3 e5 15. Qxc8 Ne7 16. a4",
+   "proposed_by": "aysz88",
+   "votes": 0,
+   "reach": {
+    "capped": false,
+    "total": 46425,
+    "explored": 1610,
+    "resolved": 160,
+    "solved_pct": 0.3,
+    "measured_ago": "3 hours, 49 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 32,
+    "dn": 30
+   }
+  },
+  {
+   "id": 11,
+   "root_key": "bb8fb6f8f3707b19bf8c5552820921215199a755b4ff7473fe926169a1b3c9f9",
+   "title": "Nf3 e3 d5 Mainline: KidneyTaker",
+   "line_shown": "1. Nf3 f6 2. Ne5 fxe5 3. e3 g6 4. Bb5 c6 5. Qh5 d5 6. Qe5 Be6 7. Qc7 Qxc7",
+   "proposed_by": "StealYourKidney",
+   "votes": 0,
+   "reach": {
+    "capped": true,
+    "total": 300000,
+    "explored": 15065,
+    "resolved": 2094,
+    "solved_pct": 0.7,
+    "measured_ago": "3 hours, 53 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 23,
+    "dn": 307
+   }
+  },
+  {
+   "id": 6,
+   "root_key": "d1ffa71fa1dfafc86ff021f32f0f23305cd1728c7c8ca17f92450edcb781a8bf",
+   "title": "\";",
+   "line_shown": "1. Nf3 f6 2. Ng5 e5 3. Nxh7",
+   "proposed_by": "Imusing",
+   "votes": 0,
+   "reach": {
+    "capped": false,
+    "total": 219804,
+    "explored": 10640,
+    "resolved": 6594,
+    "solved_pct": 3.0,
+    "measured_ago": "4 hours, 8 minutes"
+   },
+   "proof": {
+    "proven": false,
+    "refuted": false,
+    "pn": 56,
+    "dn": 7
+   }
+  }
+ ]
+}
