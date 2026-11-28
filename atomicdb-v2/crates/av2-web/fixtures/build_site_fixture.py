@@ -43,6 +43,26 @@ def queue(page):
     return {'rows': rows, 'fleet_nodes_last_hour': number(hour.group(1)) if hour else 0}
 
 
+def backlog(page):
+    """Backlog rows of the queue page's community backlog box (anonymous
+    view: no adopt buttons, so the batch sizes are v1's ``sizes_of``)."""
+    rows = []
+    box = re.search(r'<section class="backlog-box" id="backlog">(.*?)</section>', page, re.S)
+    if not box:
+        return rows
+    for part_i, part in enumerate(box.group(1).split('<details class="backlog-adopted">')):
+        for m in re.finditer(r'<tr><td><strong>([^<]+)</strong><div class="dim backlog-about">([^<]*)</div></td>'
+                             r'<td>(\d+)(?:<div[^>]*>(\d+) held</div>)?</td><td class="dim">(\d+)'
+                             r'(?: <span[^>]*>\((\d+) accounts?\)</span>)?</td>', part):
+            title = html.unescape(m.group(1))
+            deep = title.lower().startswith('deep')
+            rows.append({'name': re.sub(r'\W+', '-', title.lower()).strip('-'), 'title': title,
+                         'about': html.unescape(m.group(2)), 'open': int(m.group(3)), 'held': int(m.group(4) or 0),
+                         'adopted': int(m.group(5)), 'adopters': int(m.group(6) or 0),
+                         'sizes': [5, 10, 20] if deep else [25, 50, 100], 'fully_adopted': part_i > 0})
+    return rows
+
+
 def boards(page):
     out = []
     for sec in re.finditer(r'<h3 class="contrib-sub">([^<]+)</h3>(.*?)</section>', page, re.S):
@@ -56,7 +76,9 @@ def boards(page):
 
 
 def main():
-    q = queue(open(sys.argv[1], encoding='utf-8').read())
+    qpage = open(sys.argv[1], encoding='utf-8').read()
+    q = queue(qpage)
+    q['backlog'] = backlog(qpage)
     b = boards(open(sys.argv[2], encoding='utf-8').read())
     json.dump({'queue': q, 'boards': b}, open(os.path.join(HERE, 'site.json'), 'w', encoding='utf-8'),
               ensure_ascii=False, indent=1)

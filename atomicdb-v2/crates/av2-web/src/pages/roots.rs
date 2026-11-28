@@ -26,6 +26,34 @@ fn minute(iso: &str) -> String {
     iso.get(..16).map(|s| s.replace('T', " ")).unwrap_or_default()
 }
 
+/// v1 `roots._daily_history` preview: the first 12 plies, numbered, then
+/// ` …` when the line goes on.
+pub fn preview(san: &str) -> String {
+    const PLIES: usize = 12;
+    let mut out = Vec::new();
+    let mut plies = 0;
+    let mut more = false;
+    for tok in san.split_whitespace() {
+        let is_number = tok.ends_with('.') && tok.trim_end_matches('.').chars().all(|c| c.is_ascii_digit());
+        if !is_number {
+            if plies == PLIES {
+                more = true;
+                break;
+            }
+            plies += 1;
+        } else if plies == PLIES {
+            more = true;
+            break;
+        }
+        out.push(tok);
+    }
+    let mut s = out.join(" ");
+    if more {
+        s.push_str(" \u{2026}");
+    }
+    s
+}
+
 fn day(iso: &str) -> String {
     iso.get(..10).unwrap_or_default().to_string()
 }
@@ -121,6 +149,32 @@ pub fn render(v: RootsView, sort: &str) -> Page {
             .into_any(),
             None => view! { <p class="dim">"Nothing recorded yet."</p> }.into_any(),
         };
+        let chart = v.chart.as_ref().and_then(super::root_chart::measure).map(super::root_chart::view);
+        let history = if v.history.is_empty() {
+            view! { <p class="dim">"Nothing recorded yet."</p> }.into_any()
+        } else {
+            let rows = v
+                .history
+                .iter()
+                .map(|h| {
+                    view! {
+                        <tr>
+                            <td style="white-space:nowrap">{h.day.clone()}</td>
+                            <td class="n">{value_h(h.value, h.status)}</td>
+                            <td class="n">{h.plies}</td>
+                            <td title=h.san.clone()>{preview(&h.san)}</td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            view! {
+                <div class="contrib-scroll"><table class="lb-table"><tbody>
+                    <tr><th>"Day"</th><th class="n">"Value"</th><th class="n">"Plies"</th><th>"Line"</th></tr>
+                    {rows}
+                </tbody></table></div>
+            }
+            .into_any()
+        };
         let open_rows = openings
             .iter()
             .map(|r| {
@@ -193,6 +247,12 @@ pub fn render(v: RootsView, sort: &str) -> Page {
             <h2>"Main line"</h2>
             <p class="dim campaign-lede">{format!("From the start position, the best known move at each step, until a solved position or {} plies. Recorded every hour.", v.max_plies)}</p>
             {main_line}
+            {chart}
+            <details id="main-line-by-day">
+                <summary style="cursor:pointer"><h2 style="display:inline-block">"Main line by day"</h2></summary>
+                <p class="dim campaign-lede">{format!("The last recording of each day (UTC), for the last {} days.", v.history_days)}</p>
+                {history}
+            </details>
             <h2 id="openings">"Named openings"</h2>
             <p class="dim campaign-lede">
                 {format!("Every position the opening catalogue names, and every position a community name has been approved for, {n_openings} in all, followed the same way: the value the explorer shows, from White's side, and the highest and lowest it has had since it was first recorded. A name approved here joins the list as soon as it is approved. Click a column to sort.")}

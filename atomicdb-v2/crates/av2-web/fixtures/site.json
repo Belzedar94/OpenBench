@@ -83,7 +83,84 @@
     "oldest_seconds": null
    }
   ],
-  "fleet_nodes_last_hour": 1310000000000
+  "fleet_nodes_last_hour": 1310000000000,
+  "backlog": [
+   {
+    "name": "deep-wins",
+    "title": "Deep wins",
+    "about": "Open positions searched twice where the side to move is ahead by 25 pawns or more. Each one is searched again at 512M nodes with one line; one such search costs as much as four at 128M, so the batches are smaller.",
+    "open": 11198,
+    "held": 0,
+    "adopted": 32399,
+    "adopters": 8,
+    "sizes": [
+     5,
+     10,
+     20
+    ],
+    "fully_adopted": false
+   },
+   {
+    "name": "lost-lines",
+    "title": "Lost lines",
+    "about": "Open positions whose stored search kept fewer lines than it asked for. Each one is searched again at 128M nodes with five lines.",
+    "open": 0,
+    "held": 0,
+    "adopted": 29588,
+    "adopters": 5,
+    "sizes": [
+     25,
+     50,
+     100
+    ],
+    "fully_adopted": true
+   },
+   {
+    "name": "shallow-searches",
+    "title": "Shallow searches",
+    "about": "Open positions whose shown search ran 128M nodes but stopped before depth 18. Each one is searched again at 128M nodes; an engine of 8 threads or fewer goes deepest on them.",
+    "open": 0,
+    "held": 0,
+    "adopted": 169579,
+    "adopters": 7,
+    "sizes": [
+     25,
+     50,
+     100
+    ],
+    "fully_adopted": true
+   },
+   {
+    "name": "clear-wins",
+    "title": "Clear wins",
+    "about": "Open positions searched only once, at 128M nodes, where the side to move is ahead by 33 to 90 pawns. Each one is searched again with one line, as deep as its value needs for the current engine to find the mate: 8M nodes from +52, 32M from +39, 128M from +33. A batch counts 128M searches, so it holds 16 positions at 8M for each one at 128M.",
+    "open": 0,
+    "held": 110209,
+    "adopted": 55173,
+    "adopters": 5,
+    "sizes": [
+     25,
+     50,
+     100
+    ],
+    "fully_adopted": true
+   },
+   {
+    "name": "white-s-best-line",
+    "title": "White's best line",
+    "about": "Open positions White reaches by always playing the move the tree rates best, whatever Black replies, whose shown search ran fewer than 128M nodes and stopped before depth 14. Each one is searched again at 128M nodes.",
+    "open": 0,
+    "held": 0,
+    "adopted": 101,
+    "adopters": 2,
+    "sizes": [
+     25,
+     50,
+     100
+    ],
+    "fully_adopted": true
+   }
+  ]
  },
  "boards": [
   {

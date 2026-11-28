@@ -295,10 +295,36 @@ pub struct MainLine {
     pub at: String,
 }
 
+/// The start position's best-record history for the roots chart (v1`RootRecord` and `ProgressSnapshot`), raw: the page computes the
+/// geometry (`pages::root_chart`).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct RootChartData {
+    /// `(unix seconds, value from White's side, status)`, oldest first.
+    pub records: Vec<(i64, i32, Status)>,
+    /// `(unix seconds, cumulative engine nodes)`, oldest first.
+    pub nodes: Vec<(i64, u64)>,
+    /// When the chart was measured (its right edge).
+    pub end: i64,
+}
+
+/// One day of `Main line by day` (v1 `MainLineSnapshot`, last of each day).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct HistoryDay {
+    pub day: String,
+    pub value: Option<i32>,
+    #[serde(default)]
+    pub status: Option<Status>,
+    pub plies: u32,
+    pub san: String,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct RootsView {
     /// ISO time the best/worst tracking started.
     pub since: Option<String>,
+    pub chart: Option<RootChartData>,
+    pub history: Vec<HistoryDay>,
+    pub history_days: u32,
     /// The start position first, then its moves.
     pub positions: Vec<RootRow>,
     pub openings: Vec<RootRow>,
@@ -326,9 +352,31 @@ pub struct QueueRow {
     pub share: f64,
 }
 
+/// One community backlog (v1 `backlog.BACKLOGS` with its counts).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct BacklogRow {
+    pub name: String,
+    pub title: String,
+    pub about: String,
+    /// Positions left to adopt.
+    pub open: u64,
+    /// Kept for a later round.
+    #[serde(default)]
+    pub held: u64,
+    pub adopted: u64,
+    #[serde(default)]
+    pub adopters: u64,
+    /// Batch sizes offered (v1 `sizes_of`).
+    pub sizes: Vec<u32>,
+    /// Nothing left: shown folded under `Show N fully adopted backlogs`.
+    #[serde(default)]
+    pub fully_adopted: bool,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct QueueView {
     pub rows: Vec<QueueRow>,
+    pub backlog: Vec<BacklogRow>,
     pub ingest_pending: u64,
     pub ingest_oldest_seconds: Option<u64>,
     pub propagation_backlog: u64,
@@ -385,6 +433,125 @@ pub struct TreeTotals {
     pub cores: u32,
 }
 
+// ---------------------------------------------------------------- home
+
+/// A running community campaign (v1 `_campaign_context` cards).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct CampaignCard {
+    #[serde(default)]
+    pub id: u64,
+    pub root_key: String,
+    pub title: String,
+    pub line_shown: String,
+    pub votes: u64,
+    pub explored: u64,
+    pub total: u64,
+    pub resolved: u64,
+    pub solved_pct: f64,
+    pub proposed_by: String,
+}
+
+/// A proposed campaign waiting for votes.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct CampaignRow {
+    pub id: u64,
+    pub root_key: String,
+    pub title: String,
+    pub line_shown: String,
+    pub proposed_by: String,
+    pub votes: u64,
+}
+
+/// A line of the "Now analyzing" / "Up next" feeds (v1 home `analyzing`,
+/// `upnext`): the line label, its full text and what is being done.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct FeedRow {
+    pub key: String,
+    #[serde(default)]
+    pub play: String,
+    pub san: String,
+    pub full: String,
+    /// `USER`, `AUTO`, `FILL`... (shown title-cased).
+    pub source: Option<String>,
+    pub opening: Option<String>,
+    pub budget: Option<u64>,
+    pub machine: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Progress {
+    pub solved_first: u32,
+    pub n_first: u32,
+    pub solved_pct: f64,
+    pub closed_24h: u64,
+    pub nodes_24h: u64,
+}
+
+/// v1 `_proof_health`.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct ProofHealth {
+    pub dn_median: u64,
+    pub and_nodes: u64,
+    pub thin: u64,
+    pub thin_pct: f64,
+    pub dn_floor: u64,
+    pub saturated: u64,
+    /// Median time to close a visitor's request, already worded (`2.9h`).
+    pub human_close: Option<String>,
+    pub human_close_samples: u64,
+    pub at: String,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Share {
+    pub source: String,
+    pub pct: f64,
+    pub count: u64,
+}
+
+/// Closures by source (v1 `attribution_24h` / `_7d`).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Attribution {
+    pub stamped_24h: u64,
+    pub total_24h: u64,
+    pub rows_24h: Vec<Share>,
+    pub stamped_7d: u64,
+    pub total_7d: u64,
+    pub rows_7d: Vec<Share>,
+}
+
+/// The home page's own sections (v1 `views.home`); the board and the first
+/// moves come from `explorer(root)`, the boards from `leaderboard()`.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct HomeView {
+    /// `Y-m-d H:i` of the exact counters.
+    pub counters_at: Option<String>,
+    pub total: Option<u64>,
+    pub closed: Option<u64>,
+    pub nodes: Option<u64>,
+    pub analyses: Option<u64>,
+    pub requested: Option<u64>,
+    pub workers: Option<u64>,
+    pub cores: Option<u64>,
+    pub nps: Option<u64>,
+    pub positions_pm: Option<u64>,
+    pub root_pn: Option<u64>,
+    pub root_dn: Option<u64>,
+    #[serde(default)]
+    pub campaign_cards: Vec<CampaignCard>,
+    pub progress: Option<Progress>,
+    pub health: Option<ProofHealth>,
+    pub attribution: Option<Attribution>,
+    #[serde(default)]
+    pub analyzing: Vec<FeedRow>,
+    #[serde(default)]
+    pub upnext: Vec<FeedRow>,
+    #[serde(default)]
+    pub campaigns_proposed: Vec<CampaignRow>,
+    #[serde(default)]
+    pub campaigns_proposed_total: usize,
+}
+
 /// What a page depends on, for [`SiteRead::page_version`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PageKind {
@@ -394,6 +561,8 @@ pub enum PageKind {
     Queue,
     Contributors,
     Map,
+    /// Pages that change only with a deploy (docs).
+    Static,
 }
 
 /// The read side of the site.
@@ -409,8 +578,8 @@ pub trait SiteRead: Send + Sync {
     /// pages with the epoch of the snapshot they are built from (v1 rebuilds
     /// those every 15 to 60 s).  Committing elsewhere in the graph must not
     /// invalidate an explorer page.
-    fn page_version(&self, _kind: PageKind, _key: Option<&str>) -> u64 {
-        self.epoch()
+    fn page_version(&self, kind: PageKind, _key: Option<&str>) -> u64 {
+        if kind == PageKind::Static { 0 } else { self.epoch() }
     }
     /// The start position's key.
     fn root_key(&self) -> String;
@@ -422,6 +591,7 @@ pub trait SiteRead: Send + Sync {
     fn leaderboard(&self) -> Leaderboard;
     fn workers(&self) -> WorkersView;
     fn totals(&self) -> TreeTotals;
+    fn home(&self) -> HomeView;
     /// The live request of a position, as `api/live-request` returns it.
     fn live_request(&self, key: &str) -> Option<LiveRequest>;
 }

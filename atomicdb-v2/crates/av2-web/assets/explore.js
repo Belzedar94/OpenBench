@@ -1,6 +1,11 @@
 // v1 explore.html scripts that need no server data, moved verbatim into one
 // deferred file (atomicdb/templates/atomicdb/explore.html, lines noted per block).
 // The request row, the live line and the board are WASM islands in v2.
+//
+// v2: the explorer re-renders in place when a move is clicked (explore-nav.js),
+// so the per-page blocks run from atomicdbExploreInit(), once per position;
+// the keyboard block binds once.  Changes from v1 are marked "v2:".
+window.atomicdbExploreInit = function () {
 
 // ---- explore.html 136-165: tabs of the proposal panels
 (function () {
@@ -150,7 +155,8 @@
         state.at = next.key;
         state.ply += 1;
         if (!save(state)) { idle('Playing a line needs browser storage'); return; }
-        location.assign(next.url);
+        // v2: through the in-place navigation when it is there.
+        if (window.atomicdbNavigate) { window.atomicdbNavigate(next.url); } else { location.assign(next.url); }
       }
       function stop() {
         const state = load();
@@ -195,52 +201,11 @@
         clearTimeout(timer);
         timer = null;
       });
+      // v2: a position left in place must not walk on.
+      window.addEventListener('atomicdb-leave', function () { clearTimeout(timer); timer = null; }, {once: true});
       row.hidden = false;
       resume();
     }());
-
-// ---- explore.html 1001-1040: keyboard shortcuts
-    (function () {
-      // Keyboard shortcuts, never while typing: arrows walk the browser
-      // history, F flips the board (board.js), Q clicks the Request button
-      // when the page has one, Esc stops a line in play.
-      document.addEventListener('keydown', function (event) {
-        if (event.defaultPrevented || event.ctrlKey || event.metaKey
-            || event.altKey) { return; }
-        const target = event.target;
-        if (target && (target.isContentEditable
-            || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) { return; }
-        const stopLine = window.atomicdbStopLine || function () { return false; };
-        switch (event.key) {
-          case 'ArrowLeft':
-            stopLine();
-            history.back();
-            break;
-          case 'ArrowRight':
-            stopLine();
-            history.forward();
-            break;
-          case 'f':
-          case 'F':
-            window.dispatchEvent(new CustomEvent('atomicdb-flip'));
-            break;
-          case 'q':
-          case 'Q': {
-            const request = document.getElementById('reqbtn');
-            if (!request || request.disabled) { return; }
-            request.click();
-            break;
-          }
-          case 'Escape':
-            if (!stopLine()) { return; }
-            break;
-          default:
-            return;
-        }
-        event.preventDefault();
-      });
-    }());
-
 // ---- explore.html 1071-1114: FEN copy and lichess link
     (function () {
       // Copy the FEN as it stands in the box, edits included, and keep the
@@ -315,3 +280,50 @@
       });
       show(open);
     })();
+};
+
+
+// ---- explore.html 1001-1040: keyboard shortcuts
+    (function () {
+      // Keyboard shortcuts, never while typing: arrows walk the browser
+      // history, F flips the board (board.js), Q clicks the Request button
+      // when the page has one, Esc stops a line in play.
+      document.addEventListener('keydown', function (event) {
+        if (event.defaultPrevented || event.ctrlKey || event.metaKey
+            || event.altKey) { return; }
+        const target = event.target;
+        if (target && (target.isContentEditable
+            || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) { return; }
+        const stopLine = window.atomicdbStopLine || function () { return false; };
+        switch (event.key) {
+          case 'ArrowLeft':
+            stopLine();
+            history.back();
+            break;
+          case 'ArrowRight':
+            stopLine();
+            history.forward();
+            break;
+          case 'f':
+          case 'F':
+            window.dispatchEvent(new CustomEvent('atomicdb-flip'));
+            break;
+          case 'q':
+          case 'Q': {
+            const request = document.getElementById('reqbtn');
+            if (!request || request.disabled) { return; }
+            request.click();
+            break;
+          }
+          case 'Escape':
+            if (!stopLine()) { return; }
+            break;
+          default:
+            return;
+        }
+        event.preventDefault();
+      });
+    }());
+
+
+window.atomicdbExploreInit();

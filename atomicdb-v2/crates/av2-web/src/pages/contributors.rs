@@ -10,7 +10,7 @@ use leptos::prelude::*;
 /// v1 shows ten rows and folds the rest behind "Show N more".
 const SHOWN: usize = 10;
 
-fn rows_table(rows: &[ContributorRow], offset: usize, fleet: u64) -> impl IntoView + use<> {
+pub fn rows_table(rows: &[ContributorRow], offset: usize, fleet: u64) -> impl IntoView + use<> {
     let rows: Vec<_> = rows
         .iter()
         .enumerate()

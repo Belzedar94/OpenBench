@@ -5,7 +5,7 @@
 
 use super::{Page, html};
 use crate::format::human;
-use crate::pages::shell::Meta;
+use crate::pages::shell::{Meta, User};
 use crate::read::*;
 use leptos::prelude::*;
 
@@ -32,7 +32,8 @@ pub fn ago_text(seconds: u64) -> String {
 /// v1 `served_minutes` (`lanes.SERVED_WINDOW`).
 const SERVED_MINUTES: u32 = 60;
 
-pub fn render(q: QueueView) -> Page {
+pub fn render(q: QueueView, user: Option<&User>) -> Page {
+    let user = user.cloned();
     let has_served = q.rows.iter().any(|r| r.served > 0);
     let body = html(move || {
         let served_title = format!(
@@ -96,6 +97,7 @@ pub fn render(q: QueueView) -> Page {
             <p class="queue-counts"><span title="Engine nodes in every search finished in the last hour, requested or automatic"><strong>{human(q.fleet_nodes_last_hour)}</strong>" nodes searched in the last hour"</span></p>
             {writes}
             {table}
+            {super::backlog::view(&q.backlog, user.as_ref())}
         }
     });
     Page { meta: Meta { title: "AtomicDB queue".into(), ..Default::default() }, main_class: "", body, scripts: vec![] }

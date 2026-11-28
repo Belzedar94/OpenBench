@@ -31,6 +31,8 @@ pub mod pages;
 pub mod read;
 #[cfg(feature = "ssr")]
 pub mod server;
+#[cfg(feature = "ssr")]
+pub mod time;
 
 /// Entry point of the WASM bundle: hydrate the islands of the page.
 #[cfg(feature = "hydrate")]

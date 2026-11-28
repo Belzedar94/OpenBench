@@ -320,18 +320,22 @@ const FOOTER: &str = r##"<footer>AtomicDB, a practical solving effort for Atomic
   // accepts the raw secret of the csrftoken cookie as the form token, so it
   // is filled in here; a visitor without the cookie gets one minted the way
   // Django mints it (32 characters of [A-Za-z0-9]).
-  try {
-    var m = document.cookie.match(/(?:^|; )csrftoken=([A-Za-z0-9]{32}|[A-Za-z0-9]{64})(?:;|$)/);
-    var token = m ? m[1] : "";
-    if (!token) {
-      var abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      var bytes = new Uint8Array(32);
-      window.crypto.getRandomValues(bytes);
-      for (var i = 0; i < 32; i++) token += abc[bytes[i] % 62];
-      document.cookie = "csrftoken=" + token + "; path=/; max-age=31449600; samesite=lax";
-    }
-    Array.prototype.forEach.call(document.querySelectorAll("input[name=csrfmiddlewaretoken]"), function (f) { f.value = token; });
-  } catch (_error) {}
+  // Also run again after an in-place navigation (explore-nav.js).
+  window.atomicdbCsrf = function () {
+    try {
+      var m = document.cookie.match(/(?:^|; )csrftoken=([A-Za-z0-9]{32}|[A-Za-z0-9]{64})(?:;|$)/);
+      var token = m ? m[1] : "";
+      if (!token) {
+        var abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        var bytes = new Uint8Array(32);
+        window.crypto.getRandomValues(bytes);
+        for (var i = 0; i < 32; i++) token += abc[bytes[i] % 62];
+        document.cookie = "csrftoken=" + token + "; path=/; max-age=31449600; samesite=lax";
+      }
+      Array.prototype.forEach.call(document.querySelectorAll("input[name=csrfmiddlewaretoken]"), function (f) { f.value = token; });
+    } catch (_error) {}
+  };
+  window.atomicdbCsrf();
 }());
 </script>
 "##;

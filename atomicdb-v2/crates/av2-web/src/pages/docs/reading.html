@@ -1,0 +1,221 @@
+<!-- title: The position page · AtomicDB docs -->
+<h2 id="reading">The position page</h2>
+<p class="docs-lead">Every number on a position page says where it came from.
+The small chip next to a value tells you whether an engine searched that
+position itself or the value was carried up from somewhere else.</p>
+
+<figure>
+<img src="/static/atomicdb/docs/explore-overview.webp__V__"
+  width="1080" height="790" loading="lazy"
+  alt="A position page in the explorer: the board with an arrow for the best move on the left, the header and the request button under it, and on the right the moves table with columns move, state, eval with BACKED chips, PN / DN and depth.">
+<figcaption>The start position: the board and its header on the left, the
+moves table on the right. Most values carry a <em>backed</em> chip; the depth
+column shows how much search each move has had.</figcaption>
+</figure>
+
+<h3 id="chips">What the chips mean</h3>
+<div class="docs-table-wrap"><table>
+<tr><th>You see</th><th>It means</th></tr>
+<tr><td>a plain number, no chip</td><td>The position's own analysis: an
+  engine searched this position itself, and that is what it
+  reported.</td></tr>
+<tr><td><strong>backed</strong></td><td>The value worked out from what the
+  moves below already know (see <a href="/atomicdb/docs/backing/">Backed
+  values</a>). The chip shows how deep the chain is. Where the chip is a link,
+  it jumps to the position the value comes from.</td></tr>
+<tr><td><strong>walked</strong></td><td>The same kind of value, carried up a
+  line a visitor walked. No engine search supports it yet, and verification is
+  queued automatically.</td></tr>
+<tr><td><strong>repetition</strong></td><td>The line repeats a position
+  (see <a href="/atomicdb/docs/repetition/">Repetition</a>); details
+  below.</td></tr>
+<tr><td>a muted, italic number with a backed chip</td><td>A number the
+  position does not use yet (a <em>floor</em>): nobody has searched that move.
+  Details below.</td></tr>
+<tr><td><strong>borrowed</strong></td><td>A number on a move row that another
+  position's search wrote; details below.</td></tr>
+</table></div>
+<details>
+<summary>The repetition chip, exactly</summary>
+<ul>
+<li>On a move row: the value of that move comes back to the position you are
+  looking at, so the line repeats and the move is worth no more than 0,
+  whatever its own page claims.</li>
+<li>In the header: the chain that leads here returns to a position it has
+  already been through.</li>
+<li>On a disabled row: the move would re-enter the line you are
+  playing. It counts as a draw (0), and when that draw is the best the side to
+  move has, the board arrow points at it, marked <strong>repeat =
+  draw</strong>.</li>
+<li><strong>returns</strong> on a move row: on this line, the move's own
+  line comes back to a position already played, so the move is worth the best
+  way out of that loop, not the number its own page shows. The move itself does
+  not repeat: the chip names the moves after it that bring the line back
+  (<em>returns after &hellip;Bf8 Bh6 Be7</em>, or just how many plies on a phone),
+  and its tooltip names the way out the value comes from.</li>
+<li>The values of the rows follow the line you came by. Where that makes the
+  best row differ from the position's value above, the page says so under
+  the table's heading.</li>
+</ul>
+</details>
+<details>
+<summary>Muted, italic numbers (floors)</summary>
+<p>A <strong>muted, italic number that still carries a backed chip</strong> is
+a floor the position does not take. Nothing has searched that move, only some
+replies to it are known, and its number would beat the lines the search of the
+position you are looking at published. It keeps its place in the table, the
+board arrow passes over it, and searching the move settles it.</p>
+</details>
+<details>
+<summary>The borrowed chip, exactly</summary>
+<ul>
+<li>On a move row, a number nothing has searched and no engine line of the
+  position you are looking at gives. Another position's search wrote it, and
+  the chip links there.</li>
+<li>If no other position's lines give it (an older pass of this one may
+  have), the link lands on the move's position, marked <em>chain breaks
+  here</em>.</li>
+<li>The header and the board arrow count only searched moves and the
+  position's own analysis, so they can disagree with it until the move is
+  searched.</li>
+<li>A position with no search of its own shows no such chip: every number in
+  its table comes from elsewhere, as its header already says.</li>
+</ul>
+</details>
+
+<h3 id="table">The moves table</h3>
+<ul>
+<li>The line under the header says what the table below is made of: how many
+  moves an engine searched itself, how many were seeded from an engine line
+  running through this position, and how many are queued.</li>
+<li>Moves sort by best known value from the mover's side, and by nothing
+  else. A value from a 2B node search sits beside one from a 128M node search,
+  and neither is hidden behind the other.</li>
+<li>That is why a deeply analysed value can disagree with a shallow sibling
+  row: the two numbers were bought with very different amounts of search, and
+  the shallow one is the one likely to move. The gap is not papered over, it
+  is queued.</li>
+</ul>
+<p>The last column, <strong>depth</strong>, says how much search that is: the
+node budget of the deepest search the move's position has had (requests are
+128M, 512M or 2B; older 10B searches and smaller automatic ones such as 32M
+show too), or a dash where no search has reached it yet.</p>
+<ul>
+<li>Only a search that really ran counts: a request that was closed without
+  one, because other work got there first, does not.</li>
+<li>Hover the cell for the number of visits.</li>
+</ul>
+
+<h3 id="columns">Each column</h3>
+
+<h4 id="col-state">state</h4>
+<ul>
+<li><strong>unsolved</strong>: the move's position is open, nothing is proven
+  yet.</li>
+<li><strong>unexplored</strong>: open, and no engine has searched that position
+  itself; any number it shows came from a line running through it.</li>
+<li><strong>WHITE_WIN</strong>, <strong>BLACK_WIN</strong> or
+  <strong>DRAW</strong>: a proven result, followed by how it was proven:
+  TERMINAL (the game is over on the board), MATE_PV (a mate line checked move by
+  move), MINIMAX (from proven moves below it), TB (tablebase) or SOLVE (a full
+  proof replayed on the server).</li>
+<li><strong>not in tree</strong>: a legal move nobody has stepped into yet.
+  Following it adds it.</li>
+</ul>
+<p id="col-marks">A small mark after the state says something is already on
+its way for that move, so there is no need to request it again:</p>
+<ul>
+<li><span class="backed-mark" style="border-style:dashed">queued</span>
+  analysis is requested and waiting for a worker.</li>
+<li><span class="backed-mark">running</span> a worker is searching it right
+  now.</li>
+<li><span class="backed-mark">writing</span> the search has finished and its
+  result is waiting to be written into the tree; the value updates once it
+  is.</li>
+<li><span class="backed-mark light">unconfirmed mate</span> or
+  <span class="backed-mark light">unconfirmed win</span> a
+  worker reported a forced mate, or a line to a tablebase win, that the server
+  could not prove, from an account whose unproven lines are not used. The move
+  stays open until it is closed another way or the line is refuted.</li>
+</ul>
+<p>The marks are as of when the page loaded: reload to refresh them.</p>
+
+<h4 id="col-eval">eval</h4>
+<p>The value of each move for the side to move here, in centipawns (100 is
+about one pawn). Switch the eval to Pawns in the settings to see it in pawns
+from White's side instead (9500 becomes 95.00).</p>
+<ul>
+<li><strong>M3</strong>: a proven win for the side to move, mate in at most 3
+  moves, counting this move. <strong>-M3</strong>: a proven loss.</li>
+<li><strong>10000</strong>: won, with no mate distance attached (-10000: lost).
+  On an open move it is a value carried up from a move below that is already
+  proven, before this position has closed.</li>
+<li><strong>9501 to 9999</strong>: an engine announced a mate it has not
+  proven: 10000 minus the number of moves to mate after this move, so 9997 is
+  mate in 3 more moves. Negative numbers are the same for the other side.</li>
+<li><strong>9250 to 9500</strong>: an engine found a tablebase win, not a
+  mate count: 9500 minus the number of plies (half-moves) until its line
+  reaches the tablebase position, so 9481 is a tablebase win 19 plies down
+  and a shorter way in ranks higher. 9500 itself is a position already in
+  the tables, or an older result whose distance was not kept. None of these
+  is a mate distance.</li>
+<li><strong>9000 to 9249</strong>: a very large engine eval that is neither a
+  mate nor a tablebase win. Scores from 9000 up to about 15000 are squeezed
+  into this range in order, so they always rank below any tablebase win.</li>
+<li><strong>up to 8999</strong>: a plain engine eval, as the engine printed
+  it.</li>
+<li><strong>not analysed</strong>: no value yet. These rows sort just above
+  proven losses, so a run of them can sit between the open moves and the proven
+  losses at the bottom.</li>
+</ul>
+<p id="col-colours">The coloured square at the start of each row is from the
+side to move here: <span class="chip won"></span> proven win,
+<span class="chip lost"></span> proven loss, <span class="chip draw"></span>
+proven draw. Open moves are coloured by the size of their value, for either
+side: <span class="chip hot"></span> 500 or more, <span class="chip warm"></span>
+200 to 499, <span class="chip cold"></span> less than 200 or no value.</p>
+<p id="col-wdl">The thin bar under a value splits it into win, draw and loss
+for the side to move here: green, blue and red, left to right. Hover it for
+the numbers.</p>
+<ul>
+<li>A proven result (mate, tablebase, minimax, a finished game) and a move
+  that repeats the line you came by (a draw) fill the bar with that one
+  outcome.</li>
+<li>Any other value gets an <strong>estimate from the score</strong>, drawn
+  fainter: nothing in the tree stores a win/draw/loss, so the page turns the
+  number into one with a simple logistic curve,
+  win&nbsp;=&nbsp;1&nbsp;/&nbsp;(1&nbsp;+&nbsp;e<sup>(400&nbsp;&minus;&nbsp;cp)&nbsp;/&nbsp;150</sup>),
+  loss the same for the other side, draw the rest. It is not calibrated on
+  Atomic games: at 0 it reads 6 / 88 / 6, at +400 even odds of a win, at
+  +1000 98 / 2 / 0. A move with no value has no bar.</li>
+<li>With the eval switched to Pawns, the bar is turned to White's side too:
+  its left end is White's.</li>
+<li><strong>Settings &rsaquo; Explorer columns &rsaquo; W/D/L bars</strong>
+  hides or shows every bar; the choice is remembered in your browser.</li>
+</ul>
+
+<h4 id="col-pndn">pn / dn</h4>
+<p>Proof and disproof numbers of the active proof campaign: an estimate of how
+much work is left to prove the campaign's goal from that move (pn) or to refute
+it (dn). Smaller means closer, &infin; means it can no longer be done. They are
+not probabilities. Empty when the campaign has no estimate for that move.</p>
+
+<h4 id="col-depth">depth</h4>
+<p>The node budget of the deepest search the move's position has had, or a dash
+if none has reached it yet; see <a href="#table">the moves table</a>
+above.</p>
+
+<h3 id="play">Playing a line, and keys</h3>
+<p>Under the board, <strong>Play best line</strong> walks forward from the
+position on screen, one position about every second, along the move the
+arrow shows. <strong>Play random line</strong> does the same with a move
+picked at random among those whose value is within 30 of the best. Each step
+is an ordinary page, so Back retraces the line. It only follows moves already
+in the tree, and stops on a proven or finished position, where there is no
+such move to follow, or after 40 plies. The button you pressed turns into
+<strong>Stop</strong>; Esc, Back or a click anywhere else stops it too.</p>
+<p>On a computer the position page also takes keys, except while you are
+typing in a box: <kbd>&larr;</kbd> and <kbd>&rarr;</kbd> go back and forward,
+<kbd>F</kbd> turns the board round (for the rest of the visit in that tab),
+<kbd>Q</kbd> presses the Request button on a position that has one, and
+<kbd>Esc</kbd> stops a line in play.</p>
