@@ -28,6 +28,7 @@ pub mod input;
 pub mod lease;
 pub mod model;
 pub mod protocol;
+pub mod quality;
 pub mod request;
 pub mod selector;
 pub mod solve;
