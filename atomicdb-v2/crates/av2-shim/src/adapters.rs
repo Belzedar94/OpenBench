@@ -79,6 +79,10 @@ pub fn config_from(ctx: &Ctx<'_>) -> RulesConfig {
     if let Some(v) = ctx.setting("ATOMICDB_AUTO_INTERIOR_DEEP_RUNGS").and_then(Value::as_bool) {
         cfg.auto_interior_deep_rungs = v;
     }
+    // v1 tests mock `_rows_that_wait` out with `return_value=set()`.
+    if ctx.stubbed("ingest", "_rows_that_wait") {
+        cfg.waiting = false;
+    }
     cfg
 }
 

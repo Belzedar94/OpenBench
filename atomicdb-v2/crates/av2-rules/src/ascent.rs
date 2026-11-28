@@ -332,7 +332,10 @@ pub fn backup_backed_evals(
             break;
         }
         report.processed += rows.len() as u64;
-        let level = decide_level(&*g, &rows, &mut *env.loops);
+        let mut level = decide_level(&*g, &rows, &mut *env.loops);
+        if !env.cfg.waiting {
+            level.waiting.clear();
+        }
         returning.extend(level.returning.iter().copied());
         let mut propagate: Vec<PosId> = Vec::new();
         let mut standing: Vec<PosId> = Vec::new();

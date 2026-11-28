@@ -44,6 +44,9 @@ pub struct RulesConfig {
     pub backed_max_revisits: u32,
     /// BKD-7.5.
     pub backed_max_nodes: u64,
+    /// BKD-7.3 rows that wait: on (v1).  Off only reproduces the v1 tests
+    /// that mock `_rows_that_wait` out (the shim passes it through).
+    pub waiting: bool,
 }
 
 impl Default for RulesConfig {
@@ -58,6 +61,7 @@ impl Default for RulesConfig {
             backed_max_plies: BACKED_MAX_PLIES,
             backed_max_revisits: BACKED_MAX_REVISITS,
             backed_max_nodes: BACKED_MAX_NODES,
+            waiting: true,
         }
     }
 }

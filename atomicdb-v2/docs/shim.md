@@ -76,7 +76,8 @@ events become their `DBEvent`, the proof-number refresh is a follow-up
 `proof.refresh_proof_numbers`, loops are `V1Loops` with the
 `BACKED_LOOP_MAX_SECONDS` / `BACKED_CYCLE_MAX_SECONDS` the caller had
 (`adapters::loops_from`; a test that mocks `_loop_at_best_exit` out gets a
-zero loop budget, which skips the rule as the mock does).
+zero loop budget, which skips the rule as the mock does; one that mocks
+`_rows_that_wait` out gets `RulesConfig::waiting = false`).
 
 Nothing else is needed on the Python side: `intercept` routes every name
 `av2.entries()` lists. Golden cases use two names: `propagation_queue.drain_batch`
