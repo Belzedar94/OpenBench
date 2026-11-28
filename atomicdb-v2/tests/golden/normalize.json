@@ -1,0 +1,130 @@
+{
+ "version": 1,
+ "about": "Normalization rules of the v1 golden file. Read by av2-compat; explained in atomicdb-v2/docs/api-contract.md, section 7. volatile: never compared. budgeted: v1 is not deterministic there (wall-clock walk budget); a difference is a warning in snapshot mode. growth: values the tree changes as it grows; compared by type only in live mode. optional: keys that may be absent in shape comparisons. keyed: arrays compared row by row through a key field.",
+ "headers": {
+  "compare": ["content-type", "cache-control", "retry-after", "allow", "x-frame-options",
+              "x-content-type-options", "referrer-policy", "cross-origin-opener-policy"],
+  "through_nginx": ["vary", "content-encoding"],
+  "volatile": ["etag", "expires", "date", "server", "content-length"]
+ },
+ "endpoints": {
+  "query": {
+   "keyed": {"$.moves": "uci"},
+   "budgeted": [
+    {"path": "$.moves[*].repetition", "why": "_line_walk_budget: 1.5 s of wall clock decide how far the repetition walk goes"},
+    "$.moves[*].returns", "$.moves[*].returns_line", "$.moves[*].returns_exit",
+    {"path": "$.moves[*].score", "why": "a repetition row shows 0 and a returns row its line value; both depend on the walk"},
+    {"path": "$.best_move", "why": "the arrow follows the rows above"}
+   ],
+   "growth": [
+    "$.status", "$.closure", "$.score", "$.point", "$.backed_plies", "$.best_move", "$.trust",
+    "$.visits", "$.nodes", "$.moves", "$.analysis", "$.opening", "$.opening_named_by"
+   ],
+   "optional": [
+    "$.analysis.lines[*].raw", "$.analysis.lines[*].depth", "$.analysis.lines[*].seldepth",
+    "$.analysis.lines[*].nodes", "$.analysis.lines[*].nps", "$.analysis.lines[*].time",
+    "$.analysis.lines[*].hashfull",
+    "$.analysis.previous[*].raw", "$.analysis.previous[*].depth", "$.analysis.previous[*].seldepth",
+    "$.analysis.previous[*].nodes", "$.analysis.previous[*].nps", "$.analysis.previous[*].time",
+    "$.analysis.previous[*].hashfull",
+    "$.analysis.passes[*].depth", "$.analysis.passes[*].seldepth", "$.analysis.passes[*].nodes"
+   ]
+  },
+  "principal-variations": {
+   "keyed": {"$.position.moves": "uci"},
+   "budgeted": [
+    "$.position.moves[*].repetition", "$.position.moves[*].returns", "$.position.moves[*].returns_line",
+    "$.position.moves[*].returns_exit", "$.position.moves[*].score", "$.position.best_move",
+    {"path": "$.lines", "why": "each line follows best_move, which follows the budgeted rows"},
+    "$.positions.*.best_move",
+    {"path": "$.positions", "why": "which positions the lines reach follows the budgeted best moves"}
+   ],
+   "growth": [
+    "$.position.status", "$.position.closure", "$.position.score", "$.position.point",
+    "$.position.backed_plies", "$.position.best_move", "$.position.trust", "$.position.visits",
+    "$.position.nodes", "$.position.moves", "$.position.analysis", "$.lines", "$.positions"
+   ],
+   "optional": [
+    "$.position.analysis.lines[*].raw", "$.position.analysis.lines[*].depth",
+    "$.position.analysis.lines[*].seldepth", "$.position.analysis.lines[*].nodes",
+    "$.position.analysis.lines[*].nps", "$.position.analysis.lines[*].time",
+    "$.position.analysis.lines[*].hashfull",
+    "$.position.analysis.previous[*].raw", "$.position.analysis.previous[*].depth",
+    "$.position.analysis.previous[*].seldepth", "$.position.analysis.previous[*].nodes",
+    "$.position.analysis.previous[*].nps", "$.position.analysis.previous[*].time",
+    "$.position.analysis.previous[*].hashfull",
+    "$.position.analysis.passes[*].depth", "$.position.analysis.passes[*].seldepth",
+    "$.position.analysis.passes[*].nodes"
+   ]
+  },
+  "backed-source": {
+   "growth": [
+    "$.position.status", "$.position.closure", "$.position.score", "$.position.point",
+    "$.position.visits", "$.position.nodes", "$.origin", "$.moves", "$.plies", "$.end"
+   ],
+   "optional": [
+    "$.origin.analysis.lines[*].raw", "$.origin.analysis.lines[*].depth",
+    "$.origin.analysis.lines[*].seldepth", "$.origin.analysis.lines[*].nodes",
+    "$.origin.analysis.lines[*].nps", "$.origin.analysis.lines[*].time",
+    "$.origin.analysis.lines[*].hashfull",
+    "$.origin.analysis.previous[*].raw", "$.origin.analysis.previous[*].depth",
+    "$.origin.analysis.previous[*].seldepth", "$.origin.analysis.previous[*].nodes",
+    "$.origin.analysis.previous[*].nps", "$.origin.analysis.previous[*].time",
+    "$.origin.analysis.previous[*].hashfull",
+    "$.origin.analysis.passes[*].depth", "$.origin.analysis.passes[*].seldepth",
+    "$.origin.analysis.passes[*].nodes"
+   ]
+  },
+  "frontier": {
+   "growth": ["$.status", "$.children_total", "$.children_solved", "$.running", "$.queued", "$.done"]
+  },
+  "live-request": {
+   "headers": ["vary"],
+   "volatile": [
+    {"path": "$.text", "why": "composed from the wall clock, the caller's session and the machine's speed"},
+    {"path": "$.chip", "why": "hot or cold by the age of the last heartbeat"}
+   ],
+   "growth": ["$.live"]
+  },
+  "roots": {
+   "volatile_headers": ["expires"],
+   "growth": ["$.since", "$.positions", "$.openings"],
+   "optional": ["$.openings[*].votes_up", "$.openings[*].votes_down", "$.openings[*].under_review"]
+  },
+  "map": {
+   "headers": ["vary", "content-encoding"],
+   "volatile_headers": ["etag"],
+   "volatile": [
+    {"path": "$.snapshot.id", "why": "a new id at every snapshot rebuild"},
+    {"path": "$.snapshot.generated_at", "why": "the time of the rebuild"}
+   ],
+   "growth": [
+    "$.snapshot.positions", "$.snapshot.edges", "$.snapshot.max_depth",
+    "$.snapshot.opening_catalog_sha256", "$.snapshot.root_key", "$.snapshot.start_key",
+    "$.request.root", "$.marks", "$.zoomable", "$.work_items", "$.work_items_total",
+    "$.work_items_truncated", "$.lineage", "$.first_moves", "$.root"
+   ]
+  },
+  "submit": {
+   "volatile": [
+    {"path": "$.summary.submit_timing_seconds", "why": "timings"},
+    {"path": "$.summary.ingest_job", "why": "a sequence number"}
+   ]
+  },
+  "lease": {
+   "volatile": [
+    {"path": "$.tasks[*].lease_token", "why": "random"},
+    {"path": "$.tasks[*].id", "why": "a sequence number"}
+   ]
+  }
+ },
+ "alternatives": [
+  {
+   "endpoint": "my-queue",
+   "method": "PUT",
+   "why": "production answers 401 'login required' to a method other than GET/POST; the repository (and v2) answer 405 (contract, section 0)",
+   "accept": [{"status": 405, "body": "{\"error\": \"GET or POST only\"}"}]
+  }
+ ],
+ "decisions": []
+}

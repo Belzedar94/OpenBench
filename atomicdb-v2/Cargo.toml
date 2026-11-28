@@ -6,6 +6,7 @@ members = [
     "crates/av2-store",
     "crates/av2-rules",
     "crates/av2-tools",
+    "crates/av2-compat",
     "bench",
 ]
 # `cargo build` / `cargo test` at the root build the v2 crates only.  The bench
@@ -17,6 +18,7 @@ default-members = [
     "crates/av2-store",
     "crates/av2-rules",
     "crates/av2-tools",
+    "crates/av2-compat",
 ]
 
 [workspace.package]
@@ -34,11 +36,13 @@ av2-rules = { path = "crates/av2-rules" }
 arc-swap = "1.7"
 crc32fast = "1.5.6"
 csv = "1.3"
+flate2 = "1"
 hex = "0.4"
 memmap2 = "0.9.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
 
 [profile.release]

@@ -9,6 +9,7 @@ The Rust workspace of AtomicDB v2 (plan: `docs/atomicdb/v2-plan.md`).
 | `crates/av2-store` | Mapped column files, redo log segments, group commit, checkpoint, recovery, backup (phase 1) | core |
 | `crates/av2-rules` | The value rules. Today only the `Rules` trait the writer calls | rules |
 | `crates/av2-tools` | `av2-load`, `av2-check`, `av2-replay`, `av2-crashtest`, `av2-perf` | core |
+| `crates/av2-compat` | The outside contract (`docs/api-contract.md`): replays v1's golden answers (`tests/golden/`) against a base URL and diffs them field by field; runs the worker protocol scenarios against a test instance | api-golden |
 | `bench` | The storage race behind the plan (`docs/atomicdb/v2-storage-benchmark.md`), kept as the regression benchmark | |
 
 ```
