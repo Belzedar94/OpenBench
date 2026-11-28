@@ -354,6 +354,44 @@ impl Fixture {
         (report, rec)
     }
 
+    /// `ingest.backup_backed_evals(seeds)` with v1's settings, no loop rules
+    /// and an in-memory task model.
+    pub fn ascent(&mut self, seeds: &[PosId]) -> (crate::ascent::AscentReport, crate::effects::Recorder, crate::purchase::MemTasks) {
+        let mut tasks = crate::purchase::MemTasks::default();
+        let (r, rec) = self.ascent_with(&crate::config::RulesConfig::default(), seeds, crate::ascent::AscentOpts::default(), &mut tasks);
+        (r, rec, tasks)
+    }
+
+    pub fn ascent_with(
+        &mut self,
+        cfg: &crate::config::RulesConfig,
+        seeds: &[PosId],
+        opts: crate::ascent::AscentOpts,
+        tasks: &mut dyn crate::purchase::TaskSink,
+    ) -> (crate::ascent::AscentReport, crate::effects::Recorder) {
+        let mut rec = crate::effects::Recorder::default();
+        let mut loops = crate::loops::NoLoops;
+        let mut env = crate::ascent::AscentEnv { cfg, effects: &mut rec, tasks, loops: &mut loops };
+        let r = crate::ascent::backup_backed_evals(&mut self.g, seeds, opts, &mut env).unwrap();
+        (r, rec)
+    }
+
+    /// `_backed_for(row, children, ...)` on the row as stored, with its
+    /// children and showcase read from the graph (what one level decides).
+    pub fn backed_for(&self, id: PosId) -> (crate::backed::Backed, Vec<crate::backed::Discrepancy>, Vec<crate::backed::Discrepancy>) {
+        let row = crate::backed::Row { id, core: self.core(id), nodes_invested: self.ext(id).nodes_invested };
+        let mut kids = crate::backed::children_of(&self.g, id, &mut Vec::new());
+        let show = crate::backed::showcase_from_graph(&self.g, id);
+        let (mut d, mut p) = (Vec::new(), Vec::new());
+        let b = crate::backed::backed_for(&row, &mut kids, Some(&mut d), &show, Some(&mut p));
+        (b, d, p)
+    }
+
+    /// The backed columns as stored.
+    pub fn stored(&self, id: PosId) -> crate::backed::Backed {
+        crate::backed::Backed::stored(&self.core(id), &self.ext(id))
+    }
+
     /// The children of `parent` as the cascade reads them (by move).
     pub fn kids(&self, parent: PosId) -> Vec<crate::exact::Kid> {
         crate::read::kids_by_move(&self.g, parent, &mut Vec::new())

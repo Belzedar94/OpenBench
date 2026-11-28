@@ -7,7 +7,8 @@
 //! - step 2 `exact`: backup_status, clock slack, fresh context, proof grade, witness
 //! - steps 3 and 5 `distance`: mate distance, the repetition check
 //! - step 4 `cascade`: the status cascade, its guards, the closure side effects
-//! - steps 6 to 8 `backed`: child contributions, `_backed_for`, the ascent
+//! - steps 6 and 7 `backed`: child contributions, coverage, floors, `_backed_for`, ties
+//! - step 8 `ascent`: the backed ascent, noise cut, wakes, guards, stale rows
 //! - step 9 `purchase`: what the ascent buys, as intents through a trait
 //! - `climb`: the cascade then the ascent (stage (b) of one batch)
 //! - `loops`: the hooks steps 11 to 14 fill in
@@ -35,13 +36,18 @@
 //! saw the input (legal moves and child keys, mate-PV verification, AND/OR
 //! proofs, tablebase probes): see plan section 3.1, preparers.
 
+pub mod ascent;
+pub mod backed;
 pub mod bands;
 pub mod cascade;
+pub mod climb;
 pub mod config;
 pub mod conv;
 pub mod distance;
 pub mod effects;
 pub mod exact;
+pub mod loops;
+pub mod purchase;
 pub mod read;
 pub mod testkit;
 
