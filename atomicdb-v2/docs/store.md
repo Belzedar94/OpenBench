@@ -226,7 +226,7 @@ similar in shape, not identical (see notes).
 | Explorer page, 1 reader | 1.59 M/s, p99 1.4 us | | key lookup, record, moves and their records, parents; 70% interior |
 | Explorer page, 8 readers | 10.9 M/s, p99 1.7 us | | |
 | Explorer page, 8 readers, writer landing at full speed | **10.0 M/s, p99 1.9 us**, writer 996 /s | 3.98 M/s, p99 4 us | |
-| Restart after clean close | 35 ms | 1 ms | 11 files mapped, segment scan; not investigated yet |
+| Restart after clean close | **5 ms** quiet; 35 ms right after the perf run | 1 ms | 11 files mapped, segment scan, a new segment created |
 | Recovery, 5,000 frames (49 MB) to replay | **140 to 148 ms** | 102 to 343 ms (256 MB) | |
 | Recovery after kill -9 (crash test) | see the PR | 58 ms median | |
 | Checkpoint of the 1.95M-position store after the runs | 310 ms (first manifest hashes everything) | 660 ms worst, on the writer thread | here on its own thread |
@@ -237,7 +237,6 @@ similar in shape, not identical (see notes).
 - Key-map compaction (section 4.3).
 - zstd compression of `archive/` (restic compresses the backup anyway; the
   archive format is the log's, so compressing it later changes nothing else).
-- Restart time on Windows (35 ms) not investigated; Linux numbers come from
-  phase 0.
+- Restart time: 5 ms on a quiet store here; Linux numbers come from phase 0.
 - The relational projection (`meta.sqlite`) and the projector: phase 5.
 - The power-cut test has only been written, not run (needs the Linux box).
