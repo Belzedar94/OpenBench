@@ -16,7 +16,7 @@ pub mod registry;
 pub mod v1;
 
 pub use graph::{Changes, EdgeRow, LoadIssue, ShimGraph};
-pub use registry::{Args, Ctx, ENTRIES, Entry, EntryError, EntryFn, Outcome};
+pub use registry::{Args, Ctx, ENTRIES, Entry, EntryError, EntryFn, Extra, Outcome};
 
 use serde_json::{Map, Value, json};
 
@@ -47,7 +47,8 @@ pub fn error_json(e: &EntryError, issues: &[LoadIssue]) -> Value {
 }
 
 /// One call: `{"positions": [row...], "edges": [edge...], "tables": {...},
-/// "args": {"args": [...], "kwargs": {...}}}` -> the reply.
+/// "constants": {...}, "settings": {...}, "args": {"args": [...], "kwargs": {...}}}`
+/// -> the reply.
 pub fn call_json(name: &str, request: &Value) -> Value {
     let rows: Vec<v1::Row> = request
         .get("positions")
@@ -55,8 +56,7 @@ pub fn call_json(name: &str, request: &Value) -> Value {
         .map(|a| a.iter().filter_map(|r| r.as_object().cloned()).collect())
         .unwrap_or_default();
     let edges: Vec<EdgeRow> = request.get("edges").and_then(|e| serde_json::from_value(e.clone()).ok()).unwrap_or_default();
-    let empty = Map::new();
-    let tables = request.get("tables").and_then(Value::as_object).unwrap_or(&empty);
+    let extra = registry::Extra::from_value(request);
     let args = request.get("args").cloned().unwrap_or(Value::Null);
     let mut g = ShimGraph::load(rows, edges);
     let issues = std::mem::take(&mut g.issues);
@@ -72,7 +72,7 @@ pub fn call_json(name: &str, request: &Value) -> Value {
         };
         return error_json(&e, &issues);
     }
-    match registry::call(name, &mut g, &args, tables) {
+    match registry::call(name, &mut g, &args, &extra) {
         Ok(o) => outcome_json(o, &issues),
         Err(e) => error_json(&e, &issues),
     }

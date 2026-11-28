@@ -115,6 +115,31 @@ def _model_for_table(table):
     raise LookupError(f'no atomicdb model for table {table}')
 
 
+# The modules whose UPPER_CASE constants the rules read (the same list the
+# golden-case recorder captures, so entries read both the same way).
+CONSTANT_MODULES = ('ingest', 'propagation_queue', 'ingest_queue', 'proof')
+SECRET_WORDS = ('PASSWORD', 'SECRET', 'TOKEN', 'KEY', 'CREDENTIAL')
+
+
+def export_constants():
+    """``{module: {NAME: value}}`` as the modules hold them now (a constant a
+    test patched with ``mock.patch`` is sent patched)."""
+    out = {}
+    for name in CONSTANT_MODULES:
+        module = importlib.import_module(f'atomicdb.{name}')
+        out[name] = {attr: list(v) if isinstance(v, (tuple, frozenset)) else v
+                     for attr, v in vars(module).items()
+                     if attr.isupper() and not attr.startswith('_')
+                     and isinstance(v, (bool, int, float, str, tuple, frozenset))}
+    return out
+
+
+def export_settings():
+    from django.conf import settings
+    return {name: getattr(settings, name) for name in dir(settings)
+            if name.startswith('ATOMICDB_') and not any(w in name for w in SECRET_WORDS)}
+
+
 def export_tables(tables, alias=None):
     alias = alias or _alias()
     return {table: list(_model_for_table(table).objects.using(alias).values())
@@ -332,6 +357,8 @@ def call_v2(name, args=(), kwargs=None, alias=None):
         'positions': positions,
         'edges': edges,
         'tables': export_tables(module.entry_tables(name), alias),
+        'constants': export_constants(),
+        'settings': export_settings(),
         'args': {'args': [encode(a) for a in args],
                  'kwargs': {k: encode(v) for k, v in kwargs.items()}},
     }

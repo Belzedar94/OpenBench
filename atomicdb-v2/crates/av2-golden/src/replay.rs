@@ -224,14 +224,11 @@ pub fn replay(case_v: &Value, file: &str, mode: Mode) -> CaseReport {
             }
             let args = json!({
                 "args": [case_v.get("inputs").cloned().unwrap_or(Value::Null)],
-                "kwargs": {
-                    "seed_rows": case_v.get("seed_rows").cloned().unwrap_or(Value::Null),
-                    "constants": case_v.get("constants").cloned().unwrap_or(Value::Null),
-                    "settings": case_v.get("settings").cloned().unwrap_or(Value::Null),
-                }
+                "kwargs": {"seed_rows": case_v.get("seed_rows").cloned().unwrap_or(Value::Null)}
             });
-            let tables = pre.other_tables();
-            match registry::call(name, &mut g, &args, &tables) {
+            let mut extra = registry::Extra::from_value(case_v);
+            extra.tables = pre.other_tables();
+            match registry::call(name, &mut g, &args, &extra) {
                 Ok(_) => {}
                 Err(e) => {
                     rep.status = if e.code() == "not_ported" { "not_ported" } else { "v2_error" };
