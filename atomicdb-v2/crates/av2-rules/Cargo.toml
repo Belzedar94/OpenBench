@@ -17,3 +17,6 @@ proptest = "1"
 # Tests only: av2-proof's optional bench feature depends on av2-tools,
 # which depends on this crate, so a normal dependency would be a cycle.
 av2-proof = { path = "../av2-proof" }
+# The zeroing oracle's differential check against the engine library
+# (tests/zeroing_vs_engine.rs).
+av2-chess.workspace = true
