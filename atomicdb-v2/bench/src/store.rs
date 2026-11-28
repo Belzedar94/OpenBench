@@ -65,8 +65,11 @@ pub const KINDS: &[&str] = &["mmap", "lmdb", "sqlite", "rocksdb", "redb", "fjall
 pub fn bulk_load(kind: &str, o: &OpenOpts, ds: &Dataset) {
     match kind {
         "mmap" => crate::stores::mmapcol::bulk_load(o, ds),
+        #[cfg(feature = "cstores")]
         "lmdb" => crate::stores::lmdb::bulk_load(o, ds),
+        #[cfg(feature = "cstores")]
         "sqlite" => crate::stores::sqlite::bulk_load(o, ds),
+        #[cfg(feature = "cstores")]
         "rocksdb" => crate::stores::rocks::bulk_load(o, ds),
         "redb" => crate::stores::redbs::bulk_load(o, ds),
         "fjall" => crate::stores::fjalls::bulk_load(o, ds),
@@ -81,8 +84,11 @@ pub fn bulk_load(kind: &str, o: &OpenOpts, ds: &Dataset) {
 pub fn open(kind: &str, o: &OpenOpts, ds: Option<&Dataset>) -> Box<dyn Store> {
     match kind {
         "mmap" => Box::new(crate::stores::mmapcol::MmapStore::open(o)),
+        #[cfg(feature = "cstores")]
         "lmdb" => Box::new(crate::stores::lmdb::LmdbStore::open(o)),
+        #[cfg(feature = "cstores")]
         "sqlite" => Box::new(crate::stores::sqlite::SqliteStore::open(o)),
+        #[cfg(feature = "cstores")]
         "rocksdb" => Box::new(crate::stores::rocks::RocksStore::open(o)),
         "redb" => Box::new(crate::stores::redbs::RedbStore::open(o)),
         "fjall" => Box::new(crate::stores::fjalls::FjallStore::open(o)),

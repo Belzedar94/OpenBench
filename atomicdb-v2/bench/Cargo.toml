@@ -8,13 +8,18 @@ publish = false
 [dependencies]
 crc32fast = "1.5.6"
 fjall = "3.1.13"
-lmdb-master-sys = "0.2.6"
+lmdb-master-sys = { version = "0.2.6", optional = true }
 memmap2 = "0.9.12"
 postgres = "0.19.14"
 redb = "5.0.0"
-rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime"] }
-rusqlite = { version = "0.43.0", features = ["bundled"] }
+rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime"], optional = true }
+rusqlite = { version = "0.43.0", features = ["bundled"], optional = true }
 xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
+
+[features]
+default = ["cstores"]
+# The stores that need a C/C++ toolchain (LMDB, SQLite, RocksDB).
+cstores = ["dep:lmdb-master-sys", "dep:rusqlite", "dep:rocksdb"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

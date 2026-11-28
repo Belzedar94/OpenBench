@@ -1,0 +1,53 @@
+Running as unit: v2bench-baseline.scope; invocation ID: 9d112ebe52d24592ac00bcb5ce17565c
+[07:19:09] host
+Linux belzedar 6.8.0-149-generic #149-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:21:10 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+12
+model name	: Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz
+MemTotal:       65752780 kB
+ext4   /dev/md2 rw,relatime
+Personalities : [raid1] [raid0] [raid6] [raid5] [raid4] [raid10] 
+md2 : active raid1 nvme1n1p3[1] nvme0n1p3[0]
+      990633280 blocks super 1.2 [2/2] [UU]
+nvme0n1 scheduler: [none] mq-deadline 
+nvme1n1 scheduler: [none] mq-deadline 
+8.41 7.63 6.77 12/591 3610933
+[07:19:09] fdatasync probe
+{"t": 1795850349.8582385, "path": "/root/v2bench-tmp/db/fsync_probe.bin", "fdatasync_4096": {"bytes": 4096, "n": 400, "mean_ms": 17.901, "p50_ms": 16.404, "p90_ms": 26.342, "p99_ms": 64.034, "max_ms": 185.719, "min_ms": 5.484}, "fdatasync_65536": {"bytes": 65536, "n": 400, "mean_ms": 20.786, "p50_ms": 18.15, "p90_ms": 28.343, "p99_ms": 103.832, "max_ms": 163.261, "min_ms": 7.694}, "fsync_4096": {"bytes": 4096, "n": 200, "mean_ms": 16.997, "p50_ms": 17.007, "p90_ms": 23.631, "p99_ms": 46.07, "max_ms": 56.801, "min_ms": 7.376}}
+[07:19:28] import ball
+imported 1560369 positions, 1994101 edges (0 dropped), 81387 expanded, settle rewrote 14666 records, 6.4s
+[07:19:38] gen syn20m
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:12.20
+	Maximum resident set size (kbytes): 1004928
+72M	data/ball
+886M	data/syn20m
+[07:19:50] ball mem: load
+[07:19:50] ball mem: suite
+[07:20:08] ball memwal: load
+[07:20:10] ball memwal: suite
+[07:20:56] ball mmap: load
+[07:20:59] ball mmap: suite
+[07:21:45] ball redb: load
+[07:21:54] ball redb: suite
+[07:23:11] ball fjall: load
+[07:23:30] ball fjall: suite
+[07:25:09] syn20m mem: load
+[07:25:09] syn20m mem: suite
+[07:25:32] syn20m memwal: load
+[07:25:48] syn20m memwal: suite
+[07:27:01] syn20m mmap: load
+[07:27:17] syn20m mmap: suite
+[07:28:03] syn20m redb: load
+[07:29:56] syn20m redb: suite
+[07:31:57] syn20m fjall: load
+[07:34:40] syn20m fjall: suite
+[07:38:06] crash tests (ball)
+[07:38:08] crash mmap
+{"stage":"crash_summary","store":"mmap","trials":20,"ok":20,"lost_acknowledged":0,"state_differs":0,"final_seq":1540,"recovery":{"n":20,"p50_us":44158,"p95_us":66525,"p99_us":66525,"max_us":66525,"mean_us":38508.7}}
+[07:39:12] crash memwal
+{"stage":"crash_summary","store":"memwal","trials":20,"ok":20,"lost_acknowledged":0,"state_differs":0,"final_seq":2642,"recovery":{"n":20,"p50_us":404749,"p95_us":546087,"p99_us":546087,"max_us":546087,"mean_us":402062.8}}
+[07:40:31] crash redb
+{"stage":"crash_summary","store":"redb","trials":20,"ok":20,"lost_acknowledged":0,"state_differs":0,"final_seq":1050,"recovery":{"n":20,"p50_us":243690,"p95_us":303490,"p99_us":303490,"max_us":303490,"mean_us":249011.6}}
+[07:42:21] crash fjall
+{"stage":"crash_summary","store":"fjall","trials":20,"ok":20,"lost_acknowledged":0,"state_differs":0,"final_seq":1039,"recovery":{"n":20,"p50_us":2561770,"p95_us":4936553,"p99_us":4936553,"max_us":4936553,"mean_us":2692555.1}}
+15.19 12.38 11.22 7/591 3640002
+[07:48:30] done
