@@ -371,11 +371,57 @@ archive: 194.7 MB of facts became 5.2 MB with the pure-Rust zstd encoder
 (about zstd level 1; the synthetic payloads repeat, real ones will compress
 less).
 
+### 8.2 On the production box (28-Nov-2026, 10:10-10:23 UTC)
+
+i7-8700 (12 threads), ext4 on md RAID1 over two consumer NVMe, kernel
+6.8, transparent huge pages `madvise`. The box was serving v1 at a load
+average of 9 to 21 the whole time, so every number below includes that
+contention. Static musl binaries, each run capped at 6 GB, `nice 10`, idle
+I/O class (`scripts/prod/run_core_prod.sh`, then an `--explore-only` run).
+
+| | production | tower |
+|---|---:|---:|
+| fsync of a commit (prepared segment, written in place), 1 landing | 7.8 to 10.7 ms mean | 0.78 ms |
+| 1 landing per commit | 90 to 122 /s | 1,044 /s |
+| 32 landings per commit | 1,660 to 2,800 /s (p50 9 to 22 ms) | 8,104 /s |
+| 32 lean landings per commit | 2,030 to 2,850 /s | 14,775 /s |
+| writer service, 1 client | 105 /s, mean 9.5 ms to visible | 1,130 /s |
+| writer service, 128 clients | 2,239 /s, batches of 64, mean 57 ms (p99 <= 1 s) | 10,476 /s |
+| writer service, open load 64/s (5x production's peak) | 62 /s, mean 65 ms | |
+| restart / recovery of 500 frames | 40 to 53 ms / 68 to 109 ms | 13 ms / |
+| background checkpoint of 225 MB | 1.3 to 1.9 s (writer not stopped) | 0.34 s |
+| kill -9 | **200 of 200 clean**, recovery p50 11 ms | |
+
+The fsync is the whole story of the commit path: in place it costs 8 to 11
+ms here, against 13.8 ms for an appending write and 16.4 ms with `fsync`
+measured in phase 0. Pipelining does not help on this disk (2,100 to 2,200
+landings a second pipelined against 2,400 to 2,800 sequential: the compute
+it hides is 2 ms of a 12 ms commit); group commit does, by growing the
+batch.
+
+**The read path: no 2x gap for this store.** The phase-0 finding (the
+benchmark's mapped store reading at half the speed of the in-memory graph
+on Linux) does not hold for `av2-store`. `av2-perf --explore-only` reads
+explorer pages with the same code from the mapped files and from a copy of
+the same bytes in anonymous memory (eligible for transparent huge pages):
+
+| production, explorer pages/s | mmap | anonymous copy |
+|---|---:|---:|
+| 1 reader, round 1 / round 2 (no hint) | 1.30 M / 1.01 M | 1.32 M / 0.98 M |
+| 4 readers, round 1 / round 2 (no hint) | 3.48 M / 2.55 M | 3.31 M / 2.24 M |
+| 1 reader, `MAP_POPULATE` (two rounds) | 0.97 M / 1.04 M | 1.04 M / 1.05 M |
+| 1 reader, `madvise(HUGEPAGE)` (two rounds) | 1.00 M / 1.03 M | 1.04 M / 1.10 M |
+
+Mapped and anonymous are within the noise of a box at load 15 to 20, with
+and without hints; the full run gave 1.26 to 1.55 M pages/s for one reader
+and 4.6 to 5.2 M for four across the four hint settings, also within the
+noise. Through the `Reader` (epoch check, `arc_swap` load per read) pages
+cost 10 to 20% more than through a plain `View`. So no hint becomes a
+default, and an in-memory copy of the hot columns is not worth building on
+these numbers.
+
 ## 9. Not done here (and where it goes)
 
-- Linux numbers for this PR's commit path and read hints: the script
-  `scripts/prod/run_core_prod.sh` is ready; the run on the production box is
-  the coordinator's call.
 - Restart time: 5 ms on a quiet store here; Linux numbers come from phase 0.
 - The relational projection (`meta.sqlite`) and the projector: phase 5.
 - The power-cut test has only been written, not run (needs the Linux box).

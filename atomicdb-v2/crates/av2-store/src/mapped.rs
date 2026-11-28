@@ -146,6 +146,25 @@ impl Mapped {
     }
 }
 
+impl Mapped {
+    /// A copy of this file's bytes in anonymous memory (eligible for
+    /// transparent huge pages on Linux), behind the same interface.  For
+    /// measuring the read path against an in-memory graph (`av2-perf
+    /// --explore-only`); not used by the store.
+    pub fn anon_copy(&self) -> io::Result<Mapped> {
+        let map = if self.len > 0 {
+            let mut m = MmapOptions::new().len(self.len as usize).map_anon()?;
+            #[cfg(target_os = "linux")]
+            let _ = m.advise(memmap2::Advice::HugePage);
+            m.copy_from_slice(self.get(0, self.len as usize).unwrap());
+            Some(MmapRaw::from(m))
+        } else {
+            None
+        };
+        Ok(Mapped { file: self.file.try_clone()?, map, len: self.len, path: self.path.clone() })
+    }
+}
+
 /// One mapping per file of `graph/`.
 pub struct Maps {
     pub m: [Arc<Mapped>; NFILES],
@@ -183,6 +202,15 @@ impl Maps {
         let mut m = self.m.clone();
         m[f as usize] = Arc::new(new);
         Ok(Maps { m })
+    }
+
+    /// Every file copied into anonymous memory (see `Mapped::anon_copy`).
+    pub fn anon_copy(&self) -> io::Result<Maps> {
+        let mut v = Vec::with_capacity(NFILES);
+        for m in self.m.iter() {
+            v.push(Arc::new(m.anon_copy()?));
+        }
+        Ok(Maps { m: v.try_into().ok().unwrap() })
     }
 
     /// A copy of these maps with file `f` replaced by `m`.

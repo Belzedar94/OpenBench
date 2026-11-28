@@ -1075,6 +1075,17 @@ impl Store {
         }
     }
 
+    /// The current mappings (for read benchmarks that bypass the epoch).
+    pub fn maps_snapshot(&self) -> Arc<Maps> {
+        self.sh.maps.load_full()
+    }
+
+    /// The committed graph copied into anonymous memory, for read benchmarks
+    /// against the mapped files (`View::new(&maps)` reads it).
+    pub fn in_memory_copy(&self) -> Result<Maps> {
+        Ok(self.sh.maps.load().anon_copy()?)
+    }
+
     /// Timings of the last commit.
     pub fn last_commit(&self) -> CommitTimings {
         self.last

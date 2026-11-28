@@ -380,6 +380,48 @@ fn main() {
         let _ = std::fs::remove_dir_all(&work);
         return;
     }
+    if a.flag("explore-only") {
+        // The read path alone: explorer pages from 1 and N readers on the
+        // mapped files, then on the same bytes copied into anonymous memory
+        // (what an in-memory graph would read), same code.
+        let fps: Arc<Vec<av2_model::Fingerprint>> = Arc::new(s.reader().read(|v| {
+            let mut pairs = Vec::new();
+            v.key_pairs(&mut pairs);
+            let mut f = vec![av2_model::Fingerprint::default(); v.len() as usize];
+            for (fp, id) in pairs {
+                f[id.index()] = fp;
+            }
+            f
+        }));
+        for th in [1usize, threads] {
+            let (rps, lat) = readers_from(s.reader(), th, secs, fps.clone());
+            emit(
+                &out,
+                &format!("{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"reader\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"),
+            );
+        }
+        let mapped = s.maps_snapshot();
+        for th in [1usize, threads] {
+            let (rps, lat) = readers_mem(mapped.clone(), th, secs, fps.clone());
+            emit(
+                &out,
+                &format!("{{\"stage\":\"explore\",\"backing\":\"mmap\",\"via\":\"view\",\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"),
+            );
+        }
+        let t = Instant::now();
+        let mem = Arc::new(s.in_memory_copy().unwrap());
+        let copy_ms = t.elapsed().as_secs_f64() * 1e3;
+        for th in [1usize, threads] {
+            let (rps, lat) = readers_mem(mem.clone(), th, secs, fps.clone());
+            emit(
+                &out,
+                &format!("{{\"stage\":\"explore\",\"backing\":\"anonymous\",\"via\":\"view\",\"copy_ms\":{copy_ms:.0},\"readers\":{th},\"reads_per_sec\":{rps:.0},\"latency_us\":{lat}}}"),
+            );
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(&work);
+        return;
+    }
     let only = a.flag("landings-only");
     if only {
         let b32 = a.n("b32", 200);
@@ -514,6 +556,48 @@ fn main() {
     if !a.flag("keep") {
         let _ = std::fs::remove_dir_all(&work);
     }
+}
+
+/// Like `readers_from`, on an in-memory copy (no writer, no epoch).
+fn readers_mem(maps: Arc<av2_store::mapped::Maps>, threads: usize, secs: f64, fps: Arc<Vec<av2_model::Fingerprint>>) -> (f64, String) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let total = Arc::new(AtomicU64::new(0));
+    let mut hs = Vec::new();
+    for t in 0..threads {
+        let (stop, total, fps, maps) = (stop.clone(), total.clone(), fps.clone(), maps.clone());
+        hs.push(std::thread::spawn(move || {
+            let v = av2_store::view::View::new(&maps);
+            let mut rng = Rng::new(0xF0 + t as u64);
+            let mut es = Vec::with_capacity(64);
+            let mut ps = Vec::with_capacity(8);
+            let mut lat = Lat::new();
+            let mut n = 0u64;
+            let mut sink = 0i64;
+            while !stop.load(Ordering::Relaxed) {
+                for _ in 0..256 {
+                    let t0 = if n.is_multiple_of(16) { Some(Instant::now()) } else { None };
+                    let pick = rng.next_u64();
+                    let id = PosId(((pick as u128 * v.len() as u128) >> 64) as u64);
+                    let mut local = Rng::new(pick);
+                    sink += explore_once(&v, id, &mut local, &fps, &mut es, &mut ps);
+                    if let Some(t0) = t0 {
+                        lat.add(t0.elapsed().as_nanos() as f64 / 1e3);
+                    }
+                    n += 1;
+                }
+            }
+            total.fetch_add(n, Ordering::Relaxed);
+            std::hint::black_box(sink);
+            lat
+        }));
+    }
+    std::thread::sleep(Duration::from_secs_f64(secs));
+    stop.store(true, Ordering::Relaxed);
+    let mut all = Lat::new();
+    for h in hs {
+        all.extend(h.join().unwrap());
+    }
+    (total.load(Ordering::Relaxed) as f64 / secs, all.json())
 }
 
 /// N readers for `secs`: (reads per second, latency summary in microseconds).
