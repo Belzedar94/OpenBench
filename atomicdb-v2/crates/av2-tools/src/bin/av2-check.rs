@@ -200,8 +200,9 @@ fn main() {
     if a.flag("footprint") {
         let (per_file, live) = store.live_bytes();
         let n = r.read(|v| v.len()).max(1);
-        let files: Vec<String> =
-            (0..av2_store::layout::NFILES).map(|f| format!("\"{}\":{:.2}", av2_store::layout::NAMES[f], per_file[f] as f64 / n as f64)).collect();
+        let files: Vec<String> = (0..av2_store::layout::NFILES)
+            .map(|f| format!("\"{}\":{:.2}", av2_store::layout::NAMES[f], per_file[f] as f64 / n as f64))
+            .collect();
         emit(
             &out,
             &format!(
