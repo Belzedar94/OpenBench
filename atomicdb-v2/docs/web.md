@@ -37,12 +37,12 @@ Abbreviations in the cache column:
 
 | URL | View | Template | Auth | v1 cache | Data the page needs | v2 status |
 |---|---|---|---|---|---|---|
-| `` (home) | `home` l.6496 | home.html, _board, _contrib_rows | anon | SWR + VC | `metrics.tree_totals` and `activity_totals`; the start position with `_child_moves`; live `WorkerPing` and leased `AnalysisTask` (up to 5); up-next positions by priority; line labels and openings; `worker_metrics`; root pn/dn; campaign cards; leaderboard | **partial**: explorer of the start position (section 2.6) |
-| `explore/<key>/` | `explore` l.9586 | explore.html, _board, missing | anon; signed in also marks notifications seen | none | Position (all fields); up to 8 parents; `?play=` route and lineage; `_child_moves` with search depth and pending marks; off-tree legal moves and SAN; opening (catalogue or community); won line / witness; raw analysis lines; provenance; request ladder; PV-verify lines; depth rungs (signed in); live request; queue bump and withdraw (own task); name suggestion; campaign credit | **ported** for anonymous visitors (section 2.6) |
+| `` (home) | `home` l.6496 | home.html, _board, _contrib_rows | anon | SWR + VC | `metrics.tree_totals` and `activity_totals`; the start position with `_child_moves`; live `WorkerPing` and leased `AnalysisTask` (up to 5); up-next positions by priority; line labels and openings; `worker_metrics`; root pn/dn; campaign cards; leaderboard | **ported** (step 2): every v1 section except the staff-only campaign buttons |
+| `explore/<key>/` | `explore` l.9586 | explore.html, _board, missing | anon; signed in also marks notifications seen | none | Position (all fields); up to 8 parents; `?play=` route and lineage; `_child_moves` with search depth and pending marks; off-tree legal moves and SAN; opening (catalogue or community); won line / witness; raw analysis lines; provenance; request ladder; PV-verify lines; depth rungs (signed in); live request; queue bump and withdraw (own task); name suggestion; campaign credit | **ported** for anonymous visitors, with in-place navigation (section 2.8); signed-in parts todo |
 | `lite/` | `lite.lite` lite.py:161 | lite.html | anon | cache_page(15) | position by key or FEN; `_child_moves`; arrow move; won line SAN; first engine line | todo (easy: no JS) |
 | `map/` | `conquest_map` l.10128 | map.html | anon | cache_page(30) + VC | root key and FEN; `conquest-map.js` fetches `api/map/v1` | **ported** (static shell, v1 JS) |
-| `roots/` | `roots.roots_page` roots.py:932 | roots.html, _root_chart | anon | SWR + VC (30 s) | `WatchedKey`, `RootExtreme`, first-move table, named openings, `MainLineSnapshot` and daily history, `root_chart`, vote minimum, `?sort` | **ported** except the chart and the "main line by day" table |
-| `queue/` | `queue_page` l.7908 | queue.html, backlog box | anon | LFM | `lanes.queue_table` (per account: waiting, running, nodes, served, oldest, share); ingest backlog; propagation lag; nodes in the last hour; backlog box | **ported** except the backlog box |
+| `roots/` | `roots.roots_page` roots.py:932 | roots.html, _root_chart | anon | SWR + VC (30 s) | `WatchedKey`, `RootExtreme`, first-move table, named openings, `MainLineSnapshot` and daily history, `root_chart`, vote minimum, `?sort` | **ported** (step 2: chart, main line by day) |
+| `queue/` | `queue_page` l.7908 | queue.html, backlog box | anon | LFM | `lanes.queue_table` (per account: waiting, running, nodes, served, oldest, share); ingest backlog; propagation lag; nodes in the last hour; backlog box | **ported** (step 2: backlog box, adopt buttons for accounts; receipts todo) |
 | `queue/anonymous/` | `queue_anonymous` l.7963 | queue_anonymous.html | anon | LFM | `contributors.present_anonymous` | todo |
 | `queue/<user>/` | `queue_user` l.7972 | queue_user.html | anon (owner controls) | LFM | `contributors.present_queue`, own subscriptions | todo |
 | `user/<user>/` | `contributor` l.8345 | contributor.html | anon (owner controls) | none | worker pings, queue rows, fleet snapshot, suggestions, badges, sparkline | todo |
@@ -50,15 +50,15 @@ Abbreviations in the cache column:
 | `workers/` | `active_workers.workers_page` active_workers.py:378 | workers.html, _workers_rows | anon | cache_page(15) + VC | live `WorkerPing`, current leases, speeds, line labels | todo (232 KB page, 0.4 to 1.9 s in v1) |
 | `contributors/` | `contributors_page` l.6694 | contributors.html | anon | cache_page(30) + VC | `contributors.leaderboard` (today, 24 h, all time) | **ported** |
 | `clubs/`, `clubs/<slug>/` | `clubs_page` l.6714 | clubs.html | anon | cache_page(30) + VC | `contributors.present_clubs` | todo |
-| `milestones/` | `milestones_page` l.6731 | milestones.html | anon | cache_page(15) + VC | `DBEvent` feed (12 rows) | todo |
-| `campaigns/` | `campaigns` l.8959 | campaigns.html | anon (staff buttons) | none | waiting `Campaign`s, reach, root pn/dn | todo |
-| `docs/`, `docs/<slug>/` | `docs`, `docs_page` l.10094 | docs.html, docs/*.html | anon | cache_page(30) + VC | constants only | todo (static: one render per deploy) |
-| `notifications/` | `notifications_page` l.8077 | notifications.html | login | none | `RequestNotification` (50) | todo |
+| `milestones/` | `milestones_page` l.6731 | milestones.html | anon | cache_page(15) + VC | `DBEvent` feed (12 rows) | **ported** (step 2) |
+| `campaigns/` | `campaigns` l.8959 | campaigns.html | anon (staff buttons) | none | waiting `Campaign`s, reach, root pn/dn | **ported** (step 2; staff buttons todo) |
+| `docs/`, `docs/<slug>/` | `docs`, `docs_page` l.10094 | docs.html, docs/*.html | anon | cache_page(30) + VC | constants only | **ported** (step 2: v1 bodies extracted by `pages/docs/extract.py`) |
+| `notifications/` | `notifications_page` l.8077 | notifications.html | login | none | `RequestNotification` (50) | **ported** (step 2), and the bell in every header |
 | `notifications/settings/` | preferences.py:256 | notification_settings.html | login | none | `ContributorPref`, `WorkerServing`, pings, campaigns | todo |
 | `suggestions/` | `suggestions` l.8004 | suggestions.html | approver | none | pending and resolved suggestions, flags, hidden names, routes | todo |
-| `fun/`, `fun/alice-atomic/`, `fun/tictactoedb/`, `fun/alice-atomic/play/<token>/` | funquests/views.py | funquests/*.html | anon / token | cache_page(30) | static, or `AliceGame` | todo (can stay on Django: decision W5) |
+| `fun/`, `fun/alice-atomic/`, `fun/tictactoedb/`, `fun/alice-atomic/play/<token>/` | funquests/views.py | funquests/*.html | anon / token | cache_page(30) | static, or `AliceGame` | todo (low traffic: last, decision W5) |
 | `method/`, `me/`, `user/<u>/queue/` | redirects | | | | | todo (trivial) |
-| `sitemap.xml` | `sitemap` l.10150 | XML | anon | cache_page(3600) | catalogue and community keys present in the tree | todo |
+| `sitemap.xml` | `sitemap` l.10150 | XML | anon | cache_page(3600) | catalogue and community keys present in the tree | **ported** (step 2) |
 
 ### 1.2 Write endpoints
 
@@ -302,17 +302,22 @@ writes `.br` (quality 11) and `.gz` (level 9) siblings for text files. The
 server loads all of it into memory at start and serves it with strong ETags:
 
 - a `?v=<digest>` URL is `immutable` for a year;
-- anything else gets `max-age=3600`.
+- anything else (the islands bundle in `pkg/`) gets `no-cache`: it is revalidated with its ETag on every use. Step 2 changed this from `max-age=3600` after a stale bundle survived a rebuild in testing.
 
 The `?v=` digest is v1's `static_version` idea: the first 10 hex characters
 of a digest of the whole tree.
 
-**Missing piece.** v1 rebuilds expensive pages off the request path
-(stale-while-revalidate). v2 renders inline on a miss for now. Roots takes
-20 ms to render and compress; the explorer takes 3 ms. A background refresh
-is a small follow-up if the store's versions move faster than the pages are
-read.
+**Slow pages are rebuilt in the background (step 2).** Each route has a
+policy:
 
+- `Fresh` re-renders inline when its version changes (the explorer: 3 ms).
+- `StaleWhileRevalidate` serves the outdated copy at once, for up to 600 s as
+  in v1, while one blocking task rebuilds it (roots, home). One rebuild runs
+  per URL; the `rebuilding` set dedupes them.
+- `PerAccount` keeps one entry per account, for pages whose body depends on
+  the visitor (the queue page's adopt buttons).
+
+`Static` pages (docs) have version 0, so they render once per process.
 ### 2.5 CSRF without per-visitor HTML
 
 v1 puts a per-visitor `csrfmiddlewaretoken` in every form, which is why its
@@ -389,10 +394,53 @@ Decision W1.
 Answers are cached for 10 s per session key, and the bridge never writes.
 The tests use vectors that Django 4.2.30 itself produced with a test key.
 
-Not ported yet: the notification bell's list and count, which still link to
-the v1 page; the approver flag, which needs `OpenBench_profile.approver`; and
+Step 2 ported the notification bell: list, unseen badge (`99+` above 99) and "mark all read", from `SiteRead::notices`. Not ported yet: the approver flag, which needs `OpenBench_profile.approver`; and
 `SECRET_KEY_FALLBACKS`, which production does not use.
 
+### 2.8 In-place navigation in the explorer (step 2)
+
+Owner decision W3 (28-Nov): keep the islands and go further. Moving through
+the tree must not reload the page.
+
+- **Server.** `GET /atomicdb/nav/explore/<key>/?play=…` returns the explorer
+  page as JSON: `{url, title, description, canonical, main}`. `main` is the
+  page's exact `<main>` content, rendered once and cached per page version
+  like the page itself, precompressed (5.9 KB brotli against 11.6 KB for the
+  whole page). A test checks that the JSON's `main` is byte-for-byte the
+  page's `<main>`. This is a new, v2-only URL; no v1 URL changes.
+- **Client (`assets/explore-nav.js`, 150 lines).**
+  - It intercepts clicks on explorer links (move table, line box,
+    transpositions, opening name) and on board moves (`atomicdbNavigate`,
+    called by the board island).
+  - It fetches the JSON, swaps the content of `<main>` and pushes the URL.
+  - The mounted board island is moved into the new content and told the new
+    position (`window.__av2BoardUpdate`): Chessground is never torn down.
+  - Other islands in the new content are hydrated with Leptos's own
+    `__hydrateIsland`.
+  - The kept v1 behaviours rerun (`atomicdbExploreInit`: tabs, play-a-line,
+    FEN copy, row folding), as do notation, eval mode and CSRF fill.
+  - Hovering a link prefetches its JSON after 60 ms, at once on touch, with a
+    cache of 64 entries. A `goto/` link is never prefetched, because it
+    writes.
+  - Back and forward replay through `popstate`.
+- **Cleanup.** The old position's timers stop: the request row compares
+  `window.__av2Gen` before every poll, and play-a-line listens for
+  `atomicdb-leave`.
+- **Fallback.** Anything unexpected falls back to v1's full page load: the
+  WASM not yet loaded, a fetch error, a missing board, a modified click.
+- **`goto/` moves.** These need the server to create the child first. The
+  navigator follows the redirect, then loads the JSON of the final URL, so
+  there is no page load there either.
+
+Measured in headless Chrome against the local release server, fixture data,
+8 moves each:
+
+| | In-place navigation | Full page load (v2, localhost) | Full page load (v1, production) |
+|---|---|---|---|
+| Click, not prefetched | 7.4 to 27.6 ms (median about 16 ms; includes the server's render and compression on a miss) | first paint 88 to 188 ms | first paint 352 to 600 ms |
+| Click after hover (prefetched) | **3.2 to 4.9 ms** | | |
+| Back | 3.4 to 8.0 ms | | |
+| Navigation JSON time to first byte (loopback HTTP) | 1.2 ms p50, 1.6 ms p90 | | |
 ## 3. Build, run, test
 
 ```
@@ -474,44 +522,25 @@ TTFB (the client's own work) and the bytes.
 
 **The WASM bundle.** It is 283 KB raw, 105 KB brotli and 126 KB gzip
 (Leptos 0.8.23, wasm-bindgen 0.2.130, `opt-level = "z"`, LTO, wasm-opt).
-`av2_web.js` adds 5.2 KB brotli. v1's equivalent (`board.js`, Chessground
+`av2_web.js` adds 5.2 KB brotli. In step 2 the bundle grew to 300 KB raw and 111 KB brotli, with the board's update hook and the request row's generation check. v1's equivalent (`board.js`, Chessground
 and the inline request script) is about 15 KB brotli. See decision W3.
 
-## 5. Decisions needed (owner)
+## 5. Decisions (owner, 28-Nov-2026)
 
-- **W1. Client-side move generation.** Keep the server-sent legal moves (v1
-  behaviour, zero bytes), and load the atomic-only ffish WASM (266 KB raw)
-  lazily only for a future multi-move feature.
-  *Recommendation: yes.* The brief asked for ffish; nothing in today's user
-  experience needs it.
-- **W2. CSRF tokens filled by JavaScript.** This makes every anonymous page
-  identical, so it can be cached and precompressed. The price is that the
-  name-suggestion and campaign forms need JavaScript.
-  *Recommendation: yes*, then move to Origin checks when v2 owns those POSTs.
-  The alternative is a per-request splice with on-the-fly compression on
-  pages with forms, which costs about 0.3 ms on the explorer and 15 ms on
-  roots.
-- **W3. Islands in WASM, or the tiny v1 scripts.** The two islands cost
-  105 KB brotli, loaded on idle and cached immutable after the first visit.
-  The same behaviour in v1's vanilla JS is about 15 KB. Options:
-  - (a) keep the WASM islands, as briefed;
-  - (b) only the board in WASM;
-  - (c) vanilla JS everywhere, and Leptos for server-side rendering only.
+- **W1.** Legal moves stay server-sent for now. ffish is not loaded.
+- **W2.** Yes: CSRF tokens are filled in by JavaScript.
+- **W3.** Keep the islands, and add in-place navigation (section 2.8).
+- **W4.** Port v1's home-page sections as they are: done in step 2.
+- **W5.** Port everything eventually, low-traffic pages last.
+- **W6.** Accepted.
 
-  *Recommendation:* (a) only if more client-side features are coming
-  (multi-select, live queue pages, an analysis board), because the bundle is
-  paid once and shared. Otherwise (c).
-- **W4. The home page.** v2 renders the explorer of the start position at
-  `/atomicdb/`. v1's home also has the headline numbers, active workers,
-  campaign cards and leaderboard, which need the store's metrics. Should
-  those be ported as they are, or should the home page simply become the
-  explorer?
-- **W5. Pages that could stay on Django longer.** The fun pages, the
-  suggestions admin and the notification settings get little traffic and are
-  write-heavy. Should they be ported last, or stay on Django?
-- **W6. Small markup differences.** None of these is visible:
-  - Leptos adds `<!>` hydration markers where an optional child is absent
-    (96 on the explorer);
-  - inline styles get a trailing `;`;
-  - attribute order differs;
-  - v1's per-visitor CSRF values are gone (W2).
+### Still to port after step 2
+
+- Pages: `lite/`, `workers/`, `user/<u>/` and its workers fragment,
+  `queue/<u>/`, `queue/anonymous/`, `clubs/`, `notifications/settings/`,
+  `suggestions/`, `fun/*`, and the redirects `method/`, `me/` and
+  `user/<u>/queue/`.
+- The signed-in explorer: depth slider, multi-select bar, move to front /
+  withdraw, receipts, pending suggestion, marking notices seen on visit.
+- Staff-only campaign buttons, on the home and campaigns pages.
+- The backlog box's receipts and the account's subscription state.

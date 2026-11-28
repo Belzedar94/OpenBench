@@ -24,7 +24,8 @@
 //!
 //! Everything under the site root's `static/` is loaded into memory at start
 //! with its `.br`/`.gz` siblings (written by `av2-web assemble`), served with
-//! a strong `ETag`; a `?v=` URL is immutable for a year.
+//! a strong `ETag`; a `?v=` URL is immutable for a year, anything else
+//! revalidates (`no-cache`).
 
 use crate::auth::{Sessions, cookie};
 use crate::pages::{
@@ -556,7 +557,10 @@ async fn static_file(State(s): State<Shared>, Path(path): Path<String>, h: Heade
         .header(header::CONTENT_TYPE, f.ctype)
         .header(header::ETAG, &f.etag)
         .header(header::VARY, "Accept-Encoding")
-        .header(header::CACHE_CONTROL, if versioned { "public, max-age=31536000, immutable" } else { "public, max-age=3600" });
+        // An unversioned URL (the islands bundle, a v1 page that forgot its ?v=)
+        // revalidates every time: a 304 costs one round trip, a stale WASM
+        // after a deploy costs a broken page.
+        .header(header::CACHE_CONTROL, if versioned { "public, max-age=31536000, immutable" } else { "public, no-cache" });
     if if_none_match(&h, &f.etag) {
         return b.status(StatusCode::NOT_MODIFIED).body(Body::empty()).unwrap_or_default();
     }
