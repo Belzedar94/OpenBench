@@ -199,7 +199,7 @@ impl BulkLoader {
             }
             group.sort_unstable_by_key(|(_, id)| *id);
             let slots = ((group.len() as f64 / BUILD_LOAD).ceil() as u64).max(MIN_SLOTS);
-            let sh = Shard { region: km_tail, slots, count: group.len() as u64 };
+            let sh = Shard { region: km_tail, slots, count: group.len() as u64, odd: false };
             let region = build_region(&sh, &group, bits);
             self.reserve(F_KM_ARENA, km_tail + region.len() as u64)?;
             self.maps.f(F_KM_ARENA).put(km_tail, &region);

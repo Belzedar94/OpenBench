@@ -5,7 +5,7 @@ use crate::checkpoint::{self, Ckpt, Manifest};
 use crate::layout::*;
 use crate::log::{self, LogWriter, Seg};
 use crate::mapped::Maps;
-use crate::view::View;
+use crate::view::{Shard, View};
 use crate::{Result, StoreError};
 use arc_swap::ArcSwap;
 use std::io::{Read, Write};
@@ -260,6 +260,7 @@ fn initial_lens(cfg: &Config) -> [u64; NFILES] {
     l[F_BLOB_ARENA as usize] = n * 32;
     l[F_KM_DIR as usize] = shards * DIR_ENTRY as u64;
     l[F_KM_ARENA as usize] = n * 48 + shards * region_bytes(MIN_SLOTS);
+    l[F_KM_ARENA_ODD as usize] = 0;
     l
 }
 
@@ -277,7 +278,9 @@ pub(crate) fn live_lens(v: &View) -> [u64; NFILES] {
     l[F_INX_ARENA as usize] = v.counter(C_INX_TAIL) * INX_CELL as u64;
     l[F_BLOB_ARENA as usize] = v.counter(C_BLOB_TAIL);
     l[F_KM_DIR as usize] = (1u64 << v.shard_bits) * DIR_ENTRY as u64;
-    l[F_KM_ARENA as usize] = v.counter(C_KM_TAIL);
+    let g = v.counter(C_KM_GEN);
+    l[arena_slot(g) as usize] = v.counter(C_KM_TAIL);
+    l[arena_slot(g + 1) as usize] = v.counter(C_KM_NEXT_TAIL);
     l
 }
 
@@ -354,22 +357,24 @@ impl Shared {
         let mut marks: Vec<(u8, u64, usize)> = Vec::new();
         for (f, o, b) in ops.clone() {
             match f {
-                F_KM_REBUILD => {
-                    let (_, region, slots) = crate::batch::decode_rebuild(b).unwrap_or_default();
-                    marks.push((F_KM_ARENA, region, region_bytes(slots) as usize));
+                F_KM_REBUILD | F_KM_MOVE => {
+                    if let Some((_, to)) = crate::batch::decode_two(b) {
+                        marks.push((to.file(), to.region, region_bytes(to.slots) as usize));
+                    }
                     marks.push((F_KM_DIR, o * DIR_ENTRY as u64, DIR_ENTRY));
                 }
-                F_KM_INSERT => {
+                F_KM_INSERT | F_KM_INSERT_ODD => {
+                    let file = if f == F_KM_INSERT { F_KM_ARENA } else { F_KM_ARENA_ODD };
                     let block = crate::batch::decode_insert(b).map(|x| x.1).unwrap_or(0);
-                    marks.push((F_KM_ARENA, o, SLOT));
-                    marks.push((F_KM_ARENA, block, 64));
+                    marks.push((file, o, SLOT));
+                    marks.push((file, block, 64));
                 }
-                F_KM_COMPACT => {
-                    // The whole new arena, the directory and the control block.
-                    marks.push((F_KM_ARENA, 0, maps.f(F_KM_ARENA).len() as usize));
-                    marks.push((F_KM_DIR, 0, maps.f(F_KM_DIR).len() as usize));
-                    marks.push((F_CTL, 0, CTL_SIZE as usize));
+                F_KM_MIGRATE_START => {
+                    // A new file in that generation's slot.
+                    let slot = arena_slot(o);
+                    marks.push((slot, 0, maps.f(slot).len().max(1) as usize));
                 }
+                F_KM_MIGRATE_END => marks.push((F_CTL, 0, CTL_SIZE as usize)),
                 _ => marks.push((f, o, b.len())),
             }
         }
@@ -380,28 +385,39 @@ impl Shared {
         let mut bad = None;
         for (f, off, b) in ops {
             match f {
-                F_KM_REBUILD => {
-                    let Some((old, region, slots)) = crate::batch::decode_rebuild(b) else {
-                        bad = Some("malformed key map rebuild record".into());
+                F_KM_REBUILD | F_KM_MOVE => {
+                    let Some((old, to)) = crate::batch::decode_two(b) else {
+                        bad = Some("malformed key map rebuild or move record".into());
                         break;
                     };
-                    match crate::batch::rebuild_region(&maps, shard_bits, &old, region, slots) {
-                        Ok((nsh, r)) if region + r.len() as u64 <= maps.f(F_KM_ARENA).len() => {
-                            maps.f(F_KM_ARENA).put(region, &r);
+                    // A rebuild recomputes the region from the old one; a move
+                    // copies it as it is.  Either way the old region is frozen.
+                    let made = if f == F_KM_REBUILD {
+                        crate::batch::rebuild_region(&maps, shard_bits, &old, &to).map_err(|e| e.to_string())
+                    } else {
+                        let n = region_bytes(old.slots) as usize;
+                        match maps.f(old.file()).get(old.region, n) {
+                            Some(src) => Ok((Shard { count: old.count, ..to }, src.to_vec())),
+                            None => Err(format!("key map region {}+{n} outside its arena", old.region)),
+                        }
+                    };
+                    match made {
+                        Ok((nsh, r)) if to.region + r.len() as u64 <= maps.f(to.file()).len() => {
+                            maps.f(to.file()).put(to.region, &r);
                             maps.f(F_KM_DIR).put(off * DIR_ENTRY as u64, &nsh.encode());
                         }
                         Ok(_) => {
-                            bad = Some(format!("key map region {region}+{} outside the arena", region_bytes(slots)));
+                            bad = Some(format!("key map region {}+{} outside the arena", to.region, region_bytes(to.slots)));
                             break;
                         }
                         Err(e) => {
-                            bad = Some(e.to_string());
+                            bad = Some(e);
                             break;
                         }
                     }
                 }
-                F_KM_INSERT => {
-                    let a = maps.f(F_KM_ARENA);
+                F_KM_INSERT | F_KM_INSERT_ODD => {
+                    let a = maps.f(if f == F_KM_INSERT { F_KM_ARENA } else { F_KM_ARENA_ODD });
                     match crate::batch::decode_insert(b) {
                         Some((slot, block)) if off + SLOT as u64 <= a.len() && block + 64 <= a.len() => {
                             a.put(off, slot);
@@ -418,13 +434,14 @@ impl Shared {
                         }
                     }
                 }
-                F_KM_COMPACT => match self.compact(&maps, off, b) {
+                F_KM_MIGRATE_START => match self.migrate_start(&maps, off) {
                     Ok(m) => maps = m,
                     Err(e) => {
                         bad = Some(e.to_string());
                         break;
                     }
                 },
+                F_KM_MIGRATE_END => self.migrate_end(&maps, off),
                 _ => {
                     if (f as usize) >= NFILES || off + b.len() as u64 > maps.m[f as usize].len() {
                         bad = Some(format!("redo record outside file {f}: {off}+{}", b.len()));
@@ -442,40 +459,43 @@ impl Shared {
         }
     }
 
-    /// Apply a compaction record: copy every live region named by it from the
-    /// current arena generation into a new one, packed in shard order, then
-    /// point the directory and the counters at it and publish the new maps.
-    fn compact(&self, maps: &Arc<Maps>, new_gen: u64, b: &[u8]) -> Result<Arc<Maps>> {
-        let (old_gen, live) =
-            crate::batch::decode_compact(b).ok_or_else(|| StoreError::Corrupt("malformed key map compaction record".into()))?;
+    /// Start of a compaction into generation `new_gen`: that generation's
+    /// arena file takes its slot (the file there before is two generations
+    /// old, and no recovery can need it: see `Batch::can_compact`).  Stale
+    /// bytes in the file do not matter: every region is written whole (by a
+    /// move or a rebuild) before anything reads it.  The file is at least as
+    /// long as the slot's was (the frame's sizing grew that one), so the moves
+    /// of this frame fit.
+    fn migrate_start(&self, maps: &Arc<Maps>, new_gen: u64) -> Result<Arc<Maps>> {
         let cur = self.km_gen.load(Ordering::Acquire);
-        if old_gen != cur || new_gen != old_gen + 1 {
-            return Err(StoreError::Corrupt(format!("compaction from generation {old_gen} to {new_gen} while generation {cur} is mapped")));
+        if new_gen != cur + 1 {
+            return Err(StoreError::Corrupt(format!("compaction into generation {new_gen} while generation {cur} is current")));
         }
-        let total: u64 = live.iter().map(|(_, sh)| region_bytes(sh.slots)).sum();
+        let slot = arena_slot(new_gen);
         let path = graph_dir(&self.dir).join(arena_name(new_gen));
-        let new = crate::mapped::Mapped::open(&path, total.max(GROW_ALIGN))?;
-        let old = maps.f(F_KM_ARENA);
-        let dir = maps.f(F_KM_DIR);
-        let mut at = 0u64;
-        for (s, sh) in &live {
-            let n = region_bytes(sh.slots);
-            let src = old
-                .get(sh.region, n as usize)
-                .ok_or_else(|| StoreError::Corrupt(format!("key map shard {s} outside generation {old_gen}")))?;
-            new.put(at, src);
-            dir.put(s * DIR_ENTRY as u64, &crate::view::Shard { region: at, ..*sh }.encode());
-            at += n;
+        if maps.f(slot).path == path {
+            return Ok(maps.clone());
         }
-        let ctl = maps.f(F_CTL);
-        ctl.put(C_KM_TAIL as u64, &total.to_le_bytes());
-        ctl.put(C_KM_LIVE as u64, &total.to_le_bytes());
-        ctl.put(C_KM_GEN as u64, &new_gen.to_le_bytes());
-        let next = Arc::new(maps.with(F_KM_ARENA, new));
+        let new = crate::mapped::Mapped::open(&path, maps.f(slot).len().max(GROW_ALIGN))?;
+        let old = maps.f(slot).path.clone();
+        let next = Arc::new(maps.with(slot, new));
         self.maps.store(next.clone());
+        // Best effort (a reader may still map it): the checkpoint retries.
+        let _ = std::fs::remove_file(&old);
+        Ok(next)
+    }
+
+    /// End of a compaction: generation `new_gen` becomes current; its tail and
+    /// live bytes become the counters', the compaction state clears.
+    fn migrate_end(&self, maps: &Arc<Maps>, new_gen: u64) {
+        let ctl = maps.f(F_CTL);
+        let (tail, live) = (maps.ctl(C_KM_NEXT_TAIL), maps.ctl(C_KM_NEXT_LIVE));
+        ctl.put(C_KM_TAIL as u64, &tail.to_le_bytes());
+        ctl.put(C_KM_LIVE as u64, &live.to_le_bytes());
+        ctl.put(C_KM_GEN as u64, &new_gen.to_le_bytes());
+        ctl.put(C_KM_NEXT_TAIL as u64, &[0u8; 24]);
         self.km_gen.store(new_gen, Ordering::Release);
         self.stats.lock().unwrap().compactions += 1;
-        Ok(next)
     }
 
     /// Delete the arena files whose generation `drop` selects (best effort: a
@@ -789,17 +809,18 @@ impl Store {
                 let mut recs = Vec::new();
                 for rec in log::redo_records(fr.redo) {
                     let (f, off, b) = rec?;
-                    let k = F_KM_ARENA as usize;
-                    if f == F_KM_REBUILD {
-                        let (_, region, slots) = crate::batch::decode_rebuild(b)
-                            .ok_or_else(|| StoreError::Corrupt("malformed key map rebuild record".into()))?;
-                        need[k] = need[k].max(region + region_bytes(slots));
-                    } else if f == F_KM_INSERT {
+                    if f == F_KM_REBUILD || f == F_KM_MOVE {
+                        let (_, to) = crate::batch::decode_two(b)
+                            .ok_or_else(|| StoreError::Corrupt("malformed key map rebuild or move record".into()))?;
+                        let k = to.file() as usize;
+                        need[k] = need[k].max(to.region + region_bytes(to.slots));
+                    } else if f == F_KM_INSERT || f == F_KM_INSERT_ODD {
                         let (_, block) =
                             crate::batch::decode_insert(b).ok_or_else(|| StoreError::Corrupt("malformed key map insert record".into()))?;
+                        let k = if f == F_KM_INSERT { F_KM_ARENA } else { F_KM_ARENA_ODD } as usize;
                         need[k] = need[k].max((off + SLOT as u64).max(block + 64));
-                    } else if f == F_KM_COMPACT {
-                        // The compaction creates its own file.
+                    } else if f == F_KM_MIGRATE_START || f == F_KM_MIGRATE_END {
+                        // They manage their own files.
                     } else if f as usize >= NFILES {
                         return Err(StoreError::Corrupt(format!("redo record for file {f}")));
                     } else {
@@ -838,7 +859,9 @@ impl Store {
         rep.last_seq = last;
         // Generations newer than the one replay ended at belong to compactions
         // that never became durable; older than the checkpoint's are dead.
-        let (lo, hi) = (ckpt.km_gen, sh.km_gen.load(Ordering::Acquire));
+        // Older generations than the checkpoint's are dead; newer than the
+        // current one + 1 belong to compactions that never became durable.
+        let (lo, hi) = (ckpt.km_gen, sh.km_gen.load(Ordering::Acquire) + 1);
         sh.delete_arenas(|g| g < lo || g > hi);
         let (pool, pool_handle) = match cfg.prealloc {
             true => {
@@ -897,7 +920,17 @@ impl Store {
 
     /// A new overlay on the committed state.
     pub fn batch(&self) -> Batch {
-        Batch::new(self.sh.maps.load_full(), self.sh.cfg.km_compact_min)
+        let mut b = Batch::new(self.sh.maps.load_full(), self.sh.cfg.km_compact_min);
+        b.can_compact = self.can_compact();
+        b
+    }
+
+    /// A compaction may start only once the last checkpoint is at the current
+    /// key-map generation (no recovery needs the generation before, whose
+    /// slot the new one takes) and no backup holds the log.
+    fn can_compact(&self) -> bool {
+        let g = self.sh.km_gen.load(Ordering::Acquire);
+        self.sh.ctl.lock().unwrap().done_km_gen == g && self.sh.pin.lock().unwrap().is_none()
     }
 
     pub fn reader(&self) -> Reader {
@@ -963,7 +996,9 @@ impl Store {
 
     /// An overlay for the next batch while `f` is in flight.
     pub fn batch_after(&self, f: &InFlight) -> Batch {
-        Batch::new_after(f.batch.clone(), self.sh.maps.load_full(), self.sh.cfg.km_compact_min)
+        let mut b = Batch::new_after(f.batch.clone(), self.sh.maps.load_full(), self.sh.cfg.km_compact_min);
+        b.can_compact = self.can_compact();
+        b
     }
 
     /// Second half of a commit: wait for the frame's fsync, apply it, and

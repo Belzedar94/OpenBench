@@ -171,20 +171,33 @@ default): the arena stays under 1.5x its live part. Steady state is between
 17/0.75 and 17/0.375 bytes of live slots per position (23 to 45 B) plus at
 most half of that in garbage.
 
-A compaction copies every live region, packed in shard order, into a new
-file `keymap.arena.<generation+1>`, rewrites the directory and the counters,
-and maps the new file. It is the last record of the frame of the batch that
-crossed the threshold, a logical record naming every live region of the old
-generation (20 bytes per shard). The old file is never written again, so
-replay copies the same bytes even over a state already past it; it is
-deleted once a checkpoint records the new generation (not while a backup
-holds the log, which copies both). Measured on the production slice: after
-1,968 commits of 32 landings (1.83M new positions, 3.39M in all) the arena
-went from 140.5 MB to 93.7 MB (27.7 B per position live) in a 48 ms commit
-(39 ms of it the copy). That is about 0.4 ms per MB, so at 200M positions a
-compaction would stall the writer for about 2 s once every time the key map
-grows by half; moving the copy to a background thread is possible later
-(the record would then name a file built beforehand).
+A compaction is **incremental**: it moves the live regions into the next
+arena generation (`keymap.arena.<generation+1>`) at most `MOVE_BUDGET`
+(1 MiB) per commit, a shard at a time in shard order, so the writer never
+stops for the whole copy. The two generations live in two file slots by
+parity (`F_KM_ARENA` for even generations, `F_KM_ARENA_ODD` for odd ones);
+each directory entry says in which slot its region is (bit 63 of the
+region). While it runs, rebuilt shards go straight into the next
+generation and inserts go wherever their shard currently is. Records:
+`MIGRATE_START` (the next generation's file takes its slot), one `MOVE` per
+shard (the old region, frozen from then on, and the new one: replay copies
+it again), `MIGRATE_END` (the next generation becomes current). The
+compaction state (next tail, next live bytes, cursor) is in `ctl`.
+
+A compaction starts only when the last checkpoint is at the current
+generation and no backup holds the log: then no recovery can need the
+generation before, whose slot the new one takes. That makes the start
+depend on checkpoint timing; the logical state never does. The checkpoint
+records the generation; files of older generations are deleted after it
+(best effort on Windows while a reader still maps one).
+
+Measured on the production slice, landing 32 searches per commit until the
+first compaction: before it, commits took 3.0 ms on average (p99 9.4 ms,
+max 19.8 ms); the compaction moved 140.5 MB down to 93.9 MB of live
+regions over **89 commits**, which took 4.9 ms on average (p99 14.1 ms,
+max 14.3 ms). The first version copied everything in one 48 ms commit,
+which would have been a stall of about 2 s at 200M positions; now that is
+about 5,500 commits of +1 to 2 ms each.
 
 ### 4.4 Inserts
 An insert is one logical record `(slot offset, fingerprint, id, filter block
@@ -360,8 +373,6 @@ less).
 
 ## 9. Not done here (and where it goes)
 
-- Compaction runs on the writer (section 4.3); fine at today's size, a
-  background copy later if the stall matters.
 - Linux numbers for this PR's commit path and read hints: the script
   `scripts/prod/run_core_prod.sh` is ready; the run on the production box is
   the coordinator's call.

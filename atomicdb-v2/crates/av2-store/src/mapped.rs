@@ -156,7 +156,14 @@ impl Maps {
     pub fn open(dir: &Path, min_lens: &[u64; NFILES], km_gen: u64) -> io::Result<Maps> {
         let mut v = Vec::with_capacity(NFILES);
         for i in 0..NFILES {
-            let name = if i == crate::layout::F_KM_ARENA as usize { crate::layout::arena_name(km_gen) } else { NAMES[i].to_string() };
+            // The arena slots hold the current generation and the next one.
+            let name = if i == crate::layout::arena_slot(km_gen) as usize {
+                crate::layout::arena_name(km_gen)
+            } else if i == crate::layout::arena_slot(km_gen + 1) as usize {
+                crate::layout::arena_name(km_gen + 1)
+            } else {
+                NAMES[i].to_string()
+            };
             v.push(Arc::new(Mapped::open(&dir.join(name), min_lens[i])?));
         }
         Ok(Maps { m: v.try_into().ok().unwrap() })

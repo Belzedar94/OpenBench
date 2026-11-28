@@ -325,39 +325,53 @@ fn main() {
     LEAN.store(a.flag("lean"), Ordering::Relaxed);
     PIPELINE.store(a.flag("pipeline"), Ordering::Relaxed);
     if a.flag("until-compaction") {
-        // Land searches (32 per commit) until the key map compacts; report
-        // the arena before and after and what that commit cost.
+        // Land searches (32 per commit) until the key map has compacted once;
+        // report the arena before and after, and what the commits during the
+        // compaction cost against the ones before it.
         drop(s);
         let mut s = Store::open(&work, Config { km_compact_min: 1 << 20, ..cfg() }).unwrap();
         let mut rng = Rng::new(77);
-        let (mut commits, mut worst) = (0u64, 0f64);
-        let km = |s: &Store| s.live_bytes().0[av2_store::layout::F_KM_ARENA as usize];
+        let km = |s: &Store| {
+            let l = s.live_bytes().0;
+            l[av2_store::layout::F_KM_ARENA as usize] + l[av2_store::layout::F_KM_ARENA_ODD as usize]
+        };
+        let (mut before, mut during) = (Lat::new(), Lat::new());
+        let (mut moving_commits, mut arena_before) = (0u64, 0u64);
         loop {
-            let before = km(&s);
             let mut b = s.batch();
             let mut facts = Vec::new();
             for _ in 0..32 {
                 landing(&mut b, &mut rng, &payload, &mut facts);
             }
+            let size = km(&s);
             let t = Instant::now();
             s.commit(b, &av2_facts::encode_all(&facts)).unwrap();
             let ms = t.elapsed().as_secs_f64() * 1e3;
-            commits += 1;
+            let cursor = s.reader().read(|v| v.counter(av2_store::layout::C_KM_CURSOR));
+            if cursor != 0 || s.stats().compactions > 0 {
+                if moving_commits == 0 {
+                    arena_before = size;
+                }
+                moving_commits += 1;
+                during.add(ms);
+            } else {
+                before.add(ms);
+            }
             if s.stats().compactions > 0 {
-                let ct = s.last_commit();
                 let n = s.reader().read(|v| v.len());
                 emit(
                     &out,
                     &format!(
-                        "{{\"stage\":\"compaction\",\"commits_before\":{commits},\"positions\":{n},\"arena_before\":{before},\"arena_after\":{},\"commit_ms\":{ms:.2},\"apply_ms\":{:.2},\"other_commits_worst_ms\":{worst:.2}}}",
+                        "{{\"stage\":\"compaction\",\"commits_before\":{},\"commits_during\":{moving_commits},\"positions\":{n},\"arena_before\":{arena_before},\"arena_after\":{},\"commit_ms_before\":{},\"commit_ms_during\":{}}}",
+                        before.len(),
                         km(&s),
-                        ct.apply.as_secs_f64() * 1e3
+                        before.json(),
+                        during.json()
                     ),
                 );
                 break;
             }
-            worst = worst.max(ms);
-            if commits > 20_000 {
+            if before.len() > 20_000 {
                 emit(&out, "{\"stage\":\"compaction\",\"note\":\"none after 20000 commits\"}");
                 break;
             }
