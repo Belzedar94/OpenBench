@@ -228,7 +228,8 @@ similar in shape, not identical (see notes).
 | Explorer page, 8 readers, writer landing at full speed | **10.0 M/s, p99 1.9 us**, writer 996 /s | 3.98 M/s, p99 4 us | |
 | Restart after clean close | **5 ms** quiet; 35 ms right after the perf run | 1 ms | 11 files mapped, segment scan, a new segment created |
 | Recovery, 5,000 frames (49 MB) to replay | **140 to 148 ms** | 102 to 343 ms (256 MB) | |
-| Recovery after kill -9 (crash test) | see the PR | 58 ms median | |
+| kill -9 trials (crash test) | **1,000 of 1,000 clean**: no acknowledged batch lost, state equal to the model every time (208 kills during start/recovery) | 125 | 366 s; graphs up to ~70,000 positions, reset every 100 trials |
+| Recovery after kill -9 | **p50 67 ms**, p90 81 ms, p99 119 ms, max 229 ms (87 frames replayed at the median, 419 at most) | 58 ms median | small segments and frequent checkpoints on purpose |
 | Checkpoint of the 1.95M-position store after the runs | 310 ms (first manifest hashes everything) | 660 ms worst, on the writer thread | here on its own thread |
 | Online backup of the slice | 0.2 s | | |
 
