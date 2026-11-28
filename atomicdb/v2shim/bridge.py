@@ -135,6 +135,20 @@ def export_constants():
     return out
 
 
+def export_stubs():
+    """``module.name`` of the functions of those modules a test replaced with
+    a ``unittest.mock`` object (``mock.patch.object(ingest,
+    '_loop_at_best_exit', return_value=None)``): the adapters switch the
+    matching rule off the same way."""
+    from unittest import mock
+    out = []
+    for name in CONSTANT_MODULES:
+        module = importlib.import_module(f'atomicdb.{name}')
+        out.extend(f'{name}.{attr}' for attr, v in vars(module).items()
+                   if isinstance(v, mock.NonCallableMock))
+    return sorted(out)
+
+
 def export_settings():
     from django.conf import settings
     return {name: getattr(settings, name) for name in dir(settings)
@@ -434,6 +448,7 @@ def call_v2(name, args=(), kwargs=None, alias=None):
         'edges': edges,
         'tables': export_tables(module.entry_tables(name), alias),
         'constants': export_constants(),
+        'stubbed': export_stubs(),
         'settings': export_settings(),
         'prepared': _prepared(name, args, kwargs, alias),
         'args': {'args': [encode(a) for a in args],
